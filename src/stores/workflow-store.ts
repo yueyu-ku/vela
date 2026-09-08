@@ -79,6 +79,8 @@ export interface WorkflowRun {
   currentStepIndex: number
   createdAt: string
   completedAt?: string
+  /** L2：可重建参数快照（rehydrateParams；Task 5 save 消费；confirmContinue 跨重启重放读） */
+  rehydrateParams?: WorkflowParams
 }
 
 /** 工作流类型 */
@@ -205,6 +207,8 @@ interface WorkflowState {
 const activeContexts = new Map<string, WorkflowContext>()
 /** 步进模式：存储「等待用户确认」的 Promise resolve（runId → resolve） */
 const continueResolveRefs = new Map<string, () => void>()
+/** L2：run 可重建参数快照（type + params → rehydrateWorkflow；Task 5 saveCheckpoint 消费，本任务先引入） */
+const runDefs = new Map<string, { type: WorkflowType; params: WorkflowParams }>()
 
 // ===== appendText 流式缓冲（共享限频调度器） =====
 // LLM 流式 chunk 逐片 setState 会高频重渲染整个面板，阻塞主线程。
@@ -336,8 +340,22 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
     if (!targetId) return
     const resolve = continueResolveRefs.get(targetId)
     if (resolve) {
+      // 进程内步进等待：内存 resolve（现状语义不变），continueResolveRefs 保持进程内语义
       resolve()
       continueResolveRefs.delete(targetId)
+    } else {
+      // L2：跨重启恢复后 waiting 无内存 resolve → 用断点重放续跑
+      // （动态 import 规避 store←→registry 静态循环；rehydrateWorkflow 按 run 参数重建定义）
+      const r = get().activeRuns.find(x => x.id === targetId)
+      if (r) {
+        import('../services/workflows/workflow-registry').then(async m => {
+          const def = m.rehydrateWorkflow(r.type, r.rehydrateParams ?? {})
+          if (def) {
+            const waitIdx = get().waitingRuns[targetId]?.waitingAfterStepIndex ?? -1
+            await executeRunFromIndex(r, def, waitIdx + 1, activeContexts.get(targetId)?.data ?? {})
+          }
+        }).catch(() => {})
+      }
     }
     set(s => {
       const newWaiting = { ...s.waitingRuns }
@@ -362,6 +380,7 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
         status: 'pending',
         logs: [],
       })),
+      rehydrateParams: definition.rehydrateParams ?? {},
     }
 
     // 添加到活跃列表
@@ -378,135 +397,11 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
       m.useLayoutStore.getState().openRightPanel('ai-output')
     }).catch(() => {})
 
-    // 创建执行上下文
-    const context: WorkflowContext = { data: {}, cancelled: false }
-    activeContexts.set(run.id, context)
+    // 记录 run 可重建参数快照（Task 5 saveCheckpoint 消费；confirmContinue 跨重启重放读 run.rehydrateParams）
+    runDefs.set(run.id, { type: run.type, params: definition.rehydrateParams ?? {} })
 
-    // 逐步执行
-    for (let i = 0; i < definition.steps.length; i++) {
-      // 检查取消
-      if (context.cancelled) {
-        updateRunById(set, run.id, { status: 'failed' })
-        get().addLog('warn', `[Cancel] ${definition.title}`)
-        break
-      }
-
-      const stepDef = definition.steps[i]
-
-      // 标记当前步骤为运行中
-      updateStepById(set, run.id, i, { status: 'running', startedAt: new Date().toISOString() })
-      updateRunById(set, run.id, { currentStepIndex: i })
-      get().addLog('info', `[${definition.title}] ${stepDef.name}`)
-
-      // 创建步骤回调
-      const callbacks: StepCallbacks = {
-        log: (message) => {
-          appendStepLogById(set, run.id, i, message)
-          get().addLog('info', `  ${message}`)
-        },
-        setProgress: (progress) => {
-          updateStepById(set, run.id, i, { progress })
-        },
-        appendText: (text) => {
-          // 共享限频调度：只累积 + 安排统一 flush（timer 保证最小间隔），
-          // 不在此同步 setState——避免 LLM 流式高频 chunk 阻塞主线程
-          const key = `${run.id}:${i}`
-          pendingAppendFlushes.set(key, (pendingAppendFlushes.get(key) ?? '') + text)
-          scheduleAppendFlush()
-        },
-      }
-
-      try {
-        const result = await stepDef.executor(run.steps[i], context, callbacks)
-        // 刷新该步骤流式缓冲残留（立即写入，避免 timer 晚于步骤完成）
-        flushAppendTextNow(`${run.id}:${i}`)
-        updateStepById(set, run.id, i, {
-          status: 'completed',
-          completedAt: new Date().toISOString(),
-          progress: 100,
-          result: result || get().activeRuns.find(r => r.id === run.id)?.steps[i].result,
-        })
-        get().addLog('info', `[${definition.title}] ${stepDef.name} — OK`)
-        saveCheckpoint(get())
-
-        // 步进模式：非最后一步，且未取消 → 暂停等待用户确认
-        if (stepByStep && i < definition.steps.length - 1 && !context.cancelled) {
-          updateRunById(set, run.id, { status: 'waiting' })
-          set(s => {
-            const newWaiting = { ...s.waitingRuns, [run.id]: { waitingForConfirm: true, waitingAfterStepIndex: i } }
-            return { waitingRuns: newWaiting, ...computeCompat(s.activeRuns, newWaiting) }
-          })
-          get().addLog('info', `[${definition.title}] Waiting: step ${i + 2} — ${definition.steps[i + 1].name}`)
-          await new Promise<void>((resolve) => { continueResolveRefs.set(run.id, resolve) })
-          if (context.cancelled) break
-          updateRunById(set, run.id, { status: 'running' })
-        }
-      } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : String(error)
-        updateStepById(set, run.id, i, {
-          status: 'failed',
-          error: errorMsg,
-          completedAt: new Date().toISOString(),
-        })
-        updateRunById(set, run.id, { status: 'failed', completedAt: new Date().toISOString() })
-        get().addLog('error', `[${definition.title}] ${stepDef.name} — FAIL: ${errorMsg}`)
-        break
-      }
-    }
-
-    // 检查是否全部完成
-    const finalRun = get().activeRuns.find(r => r.id === run.id)
-    if (finalRun && finalRun.status === 'running') {
-      updateRunById(set, run.id, { status: 'completed', completedAt: new Date().toISOString() })
-      saveCheckpoint(get())
-      get().addLog('info', `[Done] ${definition.title}`)
-
-      // 通过 EventBus 广播工作流完成事件（替代 window.dispatchEvent）
-      import('../shared/event-bus').then(m => {
-        m.globalEventBus.emit('WORKFLOW_COMPLETE', { type: definition.type })
-      }).catch(() => {})
-
-      // ===== 执行 onComplete 通知/跳转 =====
-      if (definition.onComplete) {
-        const { mode, openResult } = definition.onComplete
-        try {
-          if (mode === 'open' && openResult) {
-            // 直接打开结果
-            await openResult()
-          }
-          // silent 模式不做额外操作
-        } catch (e) {
-          get().addLog('warn', `onComplete failed: ${e}`)
-        }
-      }
-    }
-
-    // 从活跃列表移除，存入历史
-    set(s => {
-      const completedRun = s.activeRuns.find(r => r.id === run.id)
-      const newRuns = s.activeRuns.filter(r => r.id !== run.id)
-      const newWaiting = { ...s.waitingRuns }
-      delete newWaiting[run.id]
-      const newHistory = completedRun
-        ? [completedRun, ...s.history].slice(0, 50)
-        : s.history
-      return {
-        activeRuns: newRuns,
-        history: newHistory,
-        waitingRuns: newWaiting,
-        ...computeCompat(newRuns, newWaiting),
-      }
-    })
-
-    // 清理上下文与流式缓冲
-    activeContexts.delete(run.id)
-    continueResolveRefs.delete(run.id)
-    clearAppendBuffers(run.id)
-    // M2 任务级清理：run 已移入历史（完成/失败），删除其输出目录（崩溃恢复窗口已过）
-    deleteRunOutput(run.id)
-
-    // 持久化 checkpoint
-    saveCheckpoint(get())
+    // 交给可重入执行函数（断点 index 0 + 空上下文字段）——行为与原内联循环 + 收尾等价
+    await executeRunFromIndex(run, definition, 0, {}, stepByStep)
     return run.id
   },
 
@@ -695,4 +590,155 @@ function appendStepLogById(
     })
     return { activeRuns: newRuns, ...computeCompat(newRuns, s.waitingRuns) }
   })
+}
+
+/**
+ * L2：把原 startWorkflow 内联执行循环抽为按任意断点 index 推进的可重入函数。
+ *
+ * - `startIndex` 之前的步骤视为已完成（断点重放：跳过，不重跑）；
+ * - `contextData` 作为重放起点的工作流上下文字段（executor 经 `ctx.data` 读到）；
+ * - 完成后处理（完成判定/onComplete/入历史/清理/PERSIST）与本函数一体
+ *   （Task 5 save/load/restore 复用；index 0 调用 = 原 startWorkflow 内联循环等价）。
+ * `activeContexts`/`continueResolveRefs` 保持模块级进程内语义（此函数重建 context）。
+ * `stepByStep`（可选，仅 startWorkflow 传入）：重放/续跑路径默认 false（不再暂停）。
+ */
+export async function executeRunFromIndex(
+  run: WorkflowRun,
+  definition: WorkflowDefinition,
+  startIndex: number,
+  contextData: Record<string, unknown>,
+  stepByStep = false,
+): Promise<void> {
+  const set = useWorkflowStore.setState
+  const get = () => useWorkflowStore.getState()
+
+  // 重建执行上下文（模块级进程内 Map 语义）
+  const context: WorkflowContext = { data: contextData, cancelled: false }
+  activeContexts.set(run.id, context)
+
+  // 逐步执行（从断点 startIndex 起）
+  for (let i = startIndex; i < definition.steps.length; i++) {
+    // 检查取消
+    if (context.cancelled) {
+      updateRunById(set, run.id, { status: 'failed' })
+      get().addLog('warn', `[Cancel] ${definition.title}`)
+      break
+    }
+
+    const stepDef = definition.steps[i]
+
+    // 标记当前步骤为运行中
+    updateStepById(set, run.id, i, { status: 'running', startedAt: new Date().toISOString() })
+    updateRunById(set, run.id, { currentStepIndex: i })
+    get().addLog('info', `[${definition.title}] ${stepDef.name}`)
+
+    // 创建步骤回调
+    const callbacks: StepCallbacks = {
+      log: (message) => {
+        appendStepLogById(set, run.id, i, message)
+        get().addLog('info', `  ${message}`)
+      },
+      setProgress: (progress) => {
+        updateStepById(set, run.id, i, { progress })
+      },
+      appendText: (text) => {
+        // 共享限频调度：只累积 + 安排统一 flush（timer 保证最小间隔），
+        // 不在此同步 setState——避免 LLM 流式高频 chunk 阻塞主线程
+        const key = `${run.id}:${i}`
+        pendingAppendFlushes.set(key, (pendingAppendFlushes.get(key) ?? '') + text)
+        scheduleAppendFlush()
+      },
+    }
+
+    try {
+      const result = await stepDef.executor(run.steps[i], context, callbacks)
+      // 刷新该步骤流式缓冲残留（立即写入，避免 timer 晚于步骤完成）
+      flushAppendTextNow(`${run.id}:${i}`)
+      updateStepById(set, run.id, i, {
+        status: 'completed',
+        completedAt: new Date().toISOString(),
+        progress: 100,
+        result: result || get().activeRuns.find(r => r.id === run.id)?.steps[i].result,
+      })
+      get().addLog('info', `[${definition.title}] ${stepDef.name} — OK`)
+      saveCheckpoint(get())
+
+      // 步进模式：非最后一步，且未取消 → 暂停等待用户确认
+      if (stepByStep && i < definition.steps.length - 1 && !context.cancelled) {
+        updateRunById(set, run.id, { status: 'waiting' })
+        set(s => {
+          const newWaiting = { ...s.waitingRuns, [run.id]: { waitingForConfirm: true, waitingAfterStepIndex: i } }
+          return { waitingRuns: newWaiting, ...computeCompat(s.activeRuns, newWaiting) }
+        })
+        get().addLog('info', `[${definition.title}] Waiting: step ${i + 2} — ${definition.steps[i + 1].name}`)
+        await new Promise<void>((resolve) => { continueResolveRefs.set(run.id, resolve) })
+        if (context.cancelled) break
+        updateRunById(set, run.id, { status: 'running' })
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      updateStepById(set, run.id, i, {
+        status: 'failed',
+        error: errorMsg,
+        completedAt: new Date().toISOString(),
+      })
+      updateRunById(set, run.id, { status: 'failed', completedAt: new Date().toISOString() })
+      get().addLog('error', `[${definition.title}] ${stepDef.name} — FAIL: ${errorMsg}`)
+      break
+    }
+  }
+
+  // 检查是否全部完成
+  const finalRun = get().activeRuns.find(r => r.id === run.id)
+  if (finalRun && finalRun.status === 'running') {
+    updateRunById(set, run.id, { status: 'completed', completedAt: new Date().toISOString() })
+    saveCheckpoint(get())
+    get().addLog('info', `[Done] ${definition.title}`)
+
+    // 通过 EventBus 广播工作流完成事件（替代 window.dispatchEvent）
+    import('../shared/event-bus').then(m => {
+      m.globalEventBus.emit('WORKFLOW_COMPLETE', { type: definition.type })
+    }).catch(() => {})
+
+    // ===== 执行 onComplete 通知/跳转 =====
+    if (definition.onComplete) {
+      const { mode, openResult } = definition.onComplete
+      try {
+        if (mode === 'open' && openResult) {
+          // 直接打开结果
+          await openResult()
+        }
+        // silent 模式不做额外操作
+      } catch (e) {
+        get().addLog('warn', `onComplete failed: ${e}`)
+      }
+    }
+  }
+
+  // 从活跃列表移除，存入历史
+  set(s => {
+    const completedRun = s.activeRuns.find(r => r.id === run.id)
+    const newRuns = s.activeRuns.filter(r => r.id !== run.id)
+    const newWaiting = { ...s.waitingRuns }
+    delete newWaiting[run.id]
+    const newHistory = completedRun
+      ? [completedRun, ...s.history].slice(0, 50)
+      : s.history
+    return {
+      activeRuns: newRuns,
+      history: newHistory,
+      waitingRuns: newWaiting,
+      ...computeCompat(newRuns, newWaiting),
+    }
+  })
+
+  // 清理上下文与流式缓冲
+  activeContexts.delete(run.id)
+  continueResolveRefs.delete(run.id)
+  clearAppendBuffers(run.id)
+  // M2 任务级清理：run 已移入历史（完成/失败），删除其输出目录（崩溃恢复窗口已过）
+  deleteRunOutput(run.id)
+
+  // 持久化 checkpoint
+  saveCheckpoint(get())
 }
