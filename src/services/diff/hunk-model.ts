@@ -60,3 +60,13 @@ export function countAccepted(session: DiffSession): number {
 export function countSubHunks(session: DiffSession): number {
   return session.hunks.reduce((n, h) => n + h.sub.length, 0)
 }
+
+/** 统计未决（pending，决策表无记录）子 hunk 数——关闭/退出会话的二次确认依据
+ *  （M-4 收口：Tab 级关闭与浮条 closeSession 共用同一未决口径；rejected 已裁决不计入） */
+export function countUndecided(session: DiffSession | undefined): number {
+  if (!session) return 0
+  return session.hunks.reduce(
+    (n, h) => n + h.sub.filter(s => !session.decisions[s.id]).length,
+    0,
+  )
+}

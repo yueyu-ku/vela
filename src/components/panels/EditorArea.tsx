@@ -21,6 +21,7 @@ import KnowledgeOverview from '../pages/KnowledgeOverview'
 import { useProjectStore } from '../../stores/project-store'
 import { useEditorStore, type EditorTab } from '../../stores/editor-store'
 import { useLayoutStore } from '../../stores/layout-store'
+import { countUndecided } from '../../services/diff/hunk-model'
 
 
 import { ipc } from '../../services/ipc-client'
@@ -218,65 +219,66 @@ export default function EditorArea({ onNewProject }: EditorAreaProps) {
   const moreButtonRef = useRef<HTMLButtonElement>(null)
   const [closeConfirm, setCloseConfirm] = useState<string | null>(null)
 
-  // 绑定 ⌘W 快捷键：关闭当前 Tab（带 dirty 检查）
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'w' || e.key === 'W')) {
-        e.preventDefault()
-        const { activeTabId: aid, tabs: ts } = useEditorStore.getState()
-        if (aid) {
-          const t = ts.find(x => x.id === aid)
-          if (t && !t.pinned) {
-            if (t.dirty) {
-              setCloseConfirm(aid)
-            } else {
-              useEditorStore.getState().closeTab(aid)
-            }
-          }
-        }
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [])
-
   // ===== Tab 右键菜单状态 =====
   const [tabMenu, setTabMenu] = useState<{
     tabId: string
     position: { x: number; y: number }
   } | null>(null)
 
-  // ===== 批量关闭确认：待关闭的 tabId 列表（含 dirty 的）
+  // ===== 批量关闭确认：待关闭的 tabId 列表（含 dirty / inline 未决的）
   const [batchCloseConfirm, setBatchCloseConfirm] = useState<string[] | null>(null)
 
-
-  /** 尝试关闭 Tab：如果有未保存修改则弹确认对话框 */
-  const tryCloseTab = useCallback((tabId: string) => {
+  /** 尝试关闭 Tab：未保存修改 → 弹确认弹窗；inline 会话有未决建议（不 dirty）→
+   *  二次确认（M-4 收口：与浮条 closeSession 同一未决口径，避免静默丢弃建议）；否则直接关 */
+  const tryCloseTab = useCallback(async (tabId: string) => {
     const tab = tabs.find(t => t.id === tabId)
-    if (!tab) return
-    if (tab.pinned) return
+    if (!tab || tab.pinned) return
     if (tab.dirty) {
-      // 有未保存修改，弹确认弹窗
+      // 有未保存修改（含已接受但未落库内容），弹确认弹窗
       setCloseConfirm(tabId)
-    } else {
-      closeTab(tabId)
+      return
     }
-  }, [tabs, closeTab, setCloseConfirm])
+    // M-4：pending 建议未处理但 doc 未变（不 dirty）——静默关闭会丢弃建议，
+    // 补与浮条 onClose 一致的确认（inlineAccept.closeConfirm）
+    const unhandled = countUndecided(tab.inlineSession)
+    if (unhandled > 0) {
+      const { confirm } = await import('../ui/Confirm')
+      const ok = await confirm(t('inlineAccept.closeConfirm').replace('{n}', String(unhandled)))
+      if (!ok) return
+    }
+    closeTab(tabId)
+  }, [tabs, closeTab, setCloseConfirm, t])
 
-  /** 尝试批量关闭 Tab：收集待关闭列表，若其中有 dirty tab 则弹确认弹窗 */
+  /** 尝试批量关闭 Tab：收集待关闭列表，若有 dirty 或有 inline 未决建议的 tab 则弹确认弹窗 */
   const tryBatchClose = useCallback((tabIds: string[]) => {
     const cleanIds = tabIds.filter(id => {
       const t = tabs.find(t => t.id === id)
       return t && !t.pinned
     })
-    const dirtyIds = cleanIds.filter(id => tabs.find(t => t.id === id)?.dirty)
-    if (dirtyIds.length > 0) {
+    const riskyIds = cleanIds.filter(id => {
+      const t = tabs.find(t => t.id === id)
+      return t && (t.dirty || countUndecided(t.inlineSession) > 0)
+    })
+    if (riskyIds.length > 0) {
       // 待关闭列表都放入批量确认弹窗中，一次性关闭
       setBatchCloseConfirm(cleanIds)
     } else {
       cleanIds.forEach(id => closeTab(id))
     }
   }, [tabs, closeTab, setBatchCloseConfirm])
+
+  // 绑定 ⌘W 快捷键：关闭当前 Tab（带 dirty/inline 未决检查——统一走 tryCloseTab 口径）
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'w' || e.key === 'W')) {
+        e.preventDefault()
+        const { activeTabId: aid } = useEditorStore.getState()
+        if (aid) void tryCloseTab(aid)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [tryCloseTab])
 
   /** 构建 Tab 右键菜单项 */
   const buildTabMenuItems = useCallback(

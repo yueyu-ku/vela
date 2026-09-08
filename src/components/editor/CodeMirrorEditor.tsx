@@ -24,7 +24,7 @@ import {
   isManualUserEdit,
   setHunkRanges,
 } from './codemirror-inline-accept'
-import type { SubHunk } from '../../services/diff/hunk-model'
+import { countUndecided, type SubHunk } from '../../services/diff/hunk-model'
 import { InlineAcceptBar } from './InlineAcceptBar'
 import { InlineAcceptPopover } from './InlineAcceptPopover'
 import './inline-accept.css'
@@ -269,12 +269,7 @@ export default function CodeMirrorEditor({
     const tabId = filePathRef.current
     const session = inlineSessionRef.current
     if (!tabId || !session) return
-    let unhandled = 0
-    for (const h of session.hunks) {
-      for (const s of h.sub) {
-        if (!session.decisions[s.id]) unhandled++
-      }
-    }
+    const unhandled = countUndecided(session)
     if (unhandled > 0) {
       const { confirm } = await import('../ui/Confirm')
       const ok = await confirm(t('inlineAccept.closeConfirm').replace('{n}', String(unhandled)))
