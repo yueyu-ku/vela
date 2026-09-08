@@ -2118,9 +2118,9 @@ export const UI_TEXTS_DATA = {
   'knowledge.chunks': { 'zh-CN': '{n} 块', 'en-US': '{n} chunks', 'ru-RU': '{n} фрагментов' },
   // --- CodeMirrorEditor ---
   'editor.cancel': { 'zh-CN': '取消', 'en-US': 'Cancel', 'ru-RU': 'Отмена' },
-  'editor.replace': { 'zh-CN': '✓ 替换', 'en-US': '✓ Replace', 'ru-RU': '✓ Заменить' },
   // --- L1 inline 接受（气泡 AI 改写 → 会话浮层/浮条） ---
-  'inlineAccept.progress': { 'zh-CN': '已处理 {n}/{m} 处修改', 'en-US': '{n}/{m} changes processed', 'ru-RU': 'Обработано {n}/{m} изменений' },
+  // 进度 = countAccepted/countSubHunks（仅「已接受」，拒绝/待定不计入）——文案与计数语义对齐（M-6）
+  'inlineAccept.progress': { 'zh-CN': '已接受 {n}/{m} 处修改', 'en-US': '{n}/{m} changes accepted', 'ru-RU': 'Принято {n}/{m} изменений' },
   'inlineAccept.bubbleProgress': { 'zh-CN': '第 {n}/{m} 处改动', 'en-US': 'Change {n} of {m}', 'ru-RU': 'Правка {n} из {m}' },
   'inlineAccept.original': { 'zh-CN': '改前', 'en-US': 'Before', 'ru-RU': 'До' },
   'inlineAccept.revised': { 'zh-CN': '改后', 'en-US': 'After', 'ru-RU': 'После' },
