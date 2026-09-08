@@ -528,6 +528,11 @@ export interface DatabaseChannels {
   'db:revision-mark-merged': { args: [id: number, mergedToDraftId: number]; return: { success: boolean; error?: string } }
   'db:revision-mark-discarded': { args: [id: number]; return: { success: boolean; error?: string } }
 
+  // checkpoint — 工作流 checkpoint（L2：迁 DB，跨项目隔离）
+  'db:checkpoint-save': { args: [data: unknown]; return: { success: boolean; error?: string } },
+  'db:checkpoint-load': { args: []; return: { success: boolean; data?: unknown; error?: string } },
+  'db:checkpoint-clear': { args: []; return: { success: boolean; error?: string } },
+
   // 6. reviews
   'db:review-create': { args: [params: { baseDraftId: number; reviewIndex: number; content: string }]; return: { success: boolean; id?: number; error?: string } }
   'db:review-list': { args: [baseDraftId: number]; return: ReviewMeta[] }

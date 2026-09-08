@@ -11,6 +11,7 @@ import { DraftRepository } from '../repositories/draft-repository'
 import { RevisionRepository } from '../repositories/revision-repository'
 import { ReviewRepository } from '../repositories/review-repository'
 import { PostProcessRepository } from '../repositories/post-process-repository'
+import { WorkflowCheckpointRepository } from '../repositories/workflow-checkpoint-repository'
 
 // 沿用的旧表
 import { LLMHistoryRepository } from '../repositories/llm-repository'
@@ -356,6 +357,28 @@ export function registerDatabaseController() {
     } catch (err) {
       return { success: false, error: String(err) }
     }
+  })
+
+  // ============================================================
+  // checkpoint — 工作流 checkpoint（L2：迁 DB，跨项目隔离）
+  // ============================================================
+  ipcMain.handle('db:checkpoint-save', async (_event, data: unknown) => {
+    try {
+      WorkflowCheckpointRepository.save(JSON.stringify(data ?? {}))
+      return { success: true }
+    } catch (err) { return { success: false, error: String(err) } }
+  })
+  ipcMain.handle('db:checkpoint-load', async () => {
+    try {
+      const raw = WorkflowCheckpointRepository.load()
+      return { success: true, data: raw ? JSON.parse(raw) : null }
+    } catch (err) { return { success: false, error: String(err) } }
+  })
+  ipcMain.handle('db:checkpoint-clear', async () => {
+    try {
+      WorkflowCheckpointRepository.clear()
+      return { success: true }
+    } catch (err) { return { success: false, error: String(err) } }
   })
 
   // ============================================================
