@@ -12,6 +12,7 @@ import { t } from '../../shared/locale'
 import { ipc } from '../ipc-client'
 import { SpawnReviewersCommand, type ReviewerOutput } from './commands/spawn-reviewers.command'
 import { SynthesizeScoresCommand } from './commands/synthesize-scores.command'
+import { registerWorkflow } from './workflow-registry'
 
 export interface MutualEvaluationParams {
   draftId: number
@@ -24,6 +25,7 @@ export function createMutualEvaluationWorkflow(
 ): WorkflowDefinition {
   return {
     type: 'post_process',
+    rehydrateParams: { ...params },
     title: t('workflow.mutualTitle').replace('{n}', String(params.chapterNumber)),
     steps: [
       {
@@ -105,3 +107,6 @@ export function createMutualEvaluationWorkflow(
     },
   }
 }
+
+// 顶层自注册（rehydrate 重建，L2 任务6）
+registerWorkflow('post_process', (p) => createMutualEvaluationWorkflow(p as unknown as MutualEvaluationParams))

@@ -8,6 +8,7 @@ import { stripNameAlias } from '../character-normalize'
 import type { NovelConfig } from '../../shared/ipc-channels'
 
 import { runPostProcessPipeline, stripThinkingTags, extractAndRepairJSON, robustParseJSON, stringifyField as stringifyFieldUtils } from './workflow-utils'
+import { registerWorkflow } from './workflow-registry'
 
 // ==========================================
 // 1. 类型定义
@@ -94,6 +95,7 @@ export function createArchitectureWorkflow(params: ArchitectureWorkflowParams = 
     title: t('workflow.generateArch'),
     steps: finalSteps,
     onComplete: { mode: 'silent', message: t('workflow.archDone') },
+    rehydrateParams: { selectedSteps: params.selectedSteps, stepGuidance: params.stepGuidance },
   }
 }
 
@@ -414,59 +416,78 @@ export function assembleCharacterCards(
   return characterDataList
 }
 
-export function runArchCharacterExtract(projectPath: string, characterDynamicsContent: string, genre: string): void {
+export interface ArchCharacterExtractWorkflowParams {
+  projectPath: string
+  characterDynamicsContent: string
+  genre: string
+}
+
+/** 架构角色卡后处理 工作流定义工厂（可 rehydrate；§5.2 由 runArchCharacterExtract 重构而来） */
+export function createArchCharacterExtractWorkflow(params: ArchCharacterExtractWorkflowParams): WorkflowDefinition {
+  const { projectPath, characterDynamicsContent, genre } = params
   const steps = createCharacterExtractSteps(projectPath, characterDynamicsContent, genre)
-  import('../../stores/workflow-store').then(async ({ useWorkflowStore }) => {
-    await useWorkflowStore.getState().startWorkflow({
-      type: 'post_process',
-      title: t('workflow.postProcessCards'),
-      steps: [
-        {
-          name: t('workflow.extractCards'),
-          description: t('workflow.extractCardsDesc'),
-          executor: async (_step, _ctx, callbacks) => {
-            const { globalEventBus } = await import('../../shared/event-bus')
-            const archStatus = await runPostProcessPipeline(projectPath, ARCH_CHARACTER_SCOPE, t('workflow.archCharacterSource'), steps, callbacks)
-            if (archStatus.allCriticalPassed) {
-              // 角色卡提取成功 → 通过 EventBus 通知 ProjectService 刷新
-              globalEventBus.emit('ARCH_POSTPROCESS_UPDATED', {})
-            } else {
-              // 提取失败 → 记录详细错误日志
-              const failedStep = steps.find(s => {
-                const stepResult = archStatus.steps[s.key]
-                return stepResult && !stepResult.ok
-              })
-              const errMsg = failedStep
-                ? `${failedStep.label}: ${archStatus.steps[failedStep.key]?.error || t('status.unknown')}`
-                : t('log.extractFailedUnknown')
-              callbacks.log(`❌ ${errMsg}`)
-              globalEventBus.emit('CHARACTER_EXTRACT_FAILED', { error: errMsg })
-              globalEventBus.emit('ARCH_POSTPROCESS_UPDATED', {})
-            }
-          },
+  return {
+    type: 'post_process',
+    title: t('workflow.postProcessCards'),
+    rehydrateParams: { projectPath, characterDynamicsContent, genre },
+    steps: [
+      {
+        name: t('workflow.extractCards'),
+        description: t('workflow.extractCardsDesc'),
+        executor: async (_step, _ctx, callbacks) => {
+          const { globalEventBus } = await import('../../shared/event-bus')
+          const archStatus = await runPostProcessPipeline(projectPath, ARCH_CHARACTER_SCOPE, t('workflow.archCharacterSource'), steps, callbacks)
+          if (archStatus.allCriticalPassed) {
+            // 角色卡提取成功 → 通过 EventBus 通知 ProjectService 刷新
+            globalEventBus.emit('ARCH_POSTPROCESS_UPDATED', {})
+          } else {
+            // 提取失败 → 记录详细错误日志
+            const failedStep = steps.find(s => {
+              const stepResult = archStatus.steps[s.key]
+              return stepResult && !stepResult.ok
+            })
+            const errMsg = failedStep
+              ? `${failedStep.label}: ${archStatus.steps[failedStep.key]?.error || t('status.unknown')}`
+              : t('log.extractFailedUnknown')
+            callbacks.log(`❌ ${errMsg}`)
+            globalEventBus.emit('CHARACTER_EXTRACT_FAILED', { error: errMsg })
+            globalEventBus.emit('ARCH_POSTPROCESS_UPDATED', {})
+          }
         },
-      ],
-    })
+      },
+    ],
+  }
+}
+
+/** 架构角色卡后处理 启动入口（fire-and-forget；§5.2 重构后保持原调用签名，可 rehydrate） */
+export function runArchCharacterExtract(projectPath: string, characterDynamicsContent: string, genre: string): void {
+  import('../../stores/workflow-store').then(async ({ useWorkflowStore }) => {
+    await useWorkflowStore.getState().startWorkflow(createArchCharacterExtractWorkflow({ projectPath, characterDynamicsContent, genre }))
   })
 }
 
-export async function repairArchCharacterCards(projectPath: string): Promise<void> {
-  const core = await ipc.invoke('db:project-core-get')
-  if (!core?.charactersArch || core.charactersArch.length < 50) throw new Error(t('error.cannotExtractCards'))
+export interface RepairArchCharacterCardsWorkflowParams {
+  projectPath: string
+}
 
-  const project = useProjectStore.getState().currentProject
-  if (!project) throw new Error(t('error.noProject'))
-
-  const steps = createCharacterExtractSteps(projectPath, core.charactersArch, project.novelConfig.genre)
-  const { useWorkflowStore } = await import('../../stores/workflow-store')
-  await useWorkflowStore.getState().startWorkflow({
+/** 修复架构角色卡 工作流定义工厂（可 rehydrate；§5.2 由 repairArchCharacterCards 重构而来） */
+export function createRepairArchCharacterCardsWorkflow(params: RepairArchCharacterCardsWorkflowParams): WorkflowDefinition {
+  const { projectPath } = params
+  return {
     type: 'post_process',
     title: t('workflow.fixCards'),
+    rehydrateParams: { projectPath },
     steps: [
       {
         name: t('workflow.retryCards'),
         description: t('workflow.retryCardsDesc'),
         executor: async (_step, _ctx, callbacks) => {
+          // charactersArch/genre 运行时 DB/项目解析（§5.2：让工厂重建时同样查库）
+          const core = await ipc.invoke('db:project-core-get')
+          if (!core?.charactersArch || core.charactersArch.length < 50) throw new Error(t('error.cannotExtractCards'))
+          const project = useProjectStore.getState().currentProject
+          if (!project) throw new Error(t('error.noProject'))
+          const steps = createCharacterExtractSteps(projectPath, core.charactersArch, project.novelConfig.genre)
           const { globalEventBus } = await import('../../shared/event-bus')
           const archStatus = await runPostProcessPipeline(projectPath, ARCH_CHARACTER_SCOPE, t('workflow.archCharacterSource'), steps, callbacks, { onlyFailed: true })
           if (archStatus.allCriticalPassed) {
@@ -477,6 +498,20 @@ export async function repairArchCharacterCards(projectPath: string): Promise<voi
         },
       },
     ],
-  })
+  }
 }
+
+/** 修复架构角色卡 启动入口（async；§5.2 重构后保持原调用签名，可 rehydrate） */
+export async function repairArchCharacterCards(projectPath: string): Promise<void> {
+  const { useWorkflowStore } = await import('../../stores/workflow-store')
+  await useWorkflowStore.getState().startWorkflow(createRepairArchCharacterCardsWorkflow({ projectPath }))
+}
+
+// ==========================================
+// 5. 顶层自注册（rehydrate 重建，L2 任务6）——文件被 lazy import 时注册即生效
+// config_generation 不注册：params 含 onGenerated 函数回调，无法经 (type+serialized params) 重建 → 恢复走兜底
+// ==========================================
+registerWorkflow('architecture_generation', (p) => createArchitectureWorkflow(p as ArchitectureWorkflowParams))
+registerWorkflow('post_process', (p) => createArchCharacterExtractWorkflow(p as unknown as ArchCharacterExtractWorkflowParams))
+registerWorkflow('post_process', (p) => createRepairArchCharacterCardsWorkflow(p as unknown as RepairArchCharacterCardsWorkflowParams))
 

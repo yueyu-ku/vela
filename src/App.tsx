@@ -30,6 +30,10 @@ import UpdateNotification from './components/UpdateNotification'
 import { loadCustomPrompts } from './services/prompt-templates'
 import GlobalTitleTooltip from './components/ui/GlobalTitleTooltip'
 
+// L2 任务6：恢复前加载所有 workflow 模块，触发顶层 registerWorkflow（须在 restoreCheckpoint 调用之前，
+// 否则恢复时 registry 空 → 所有 run 走降级）。
+import './services/workflows/workflow-registry-init'
+
 /**
  * NovelForge 主应用组件
  * 使用 react-resizable-panels 实现可拖拽调整大小的四区布局

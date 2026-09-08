@@ -5,6 +5,7 @@ import { t } from '../../shared/locale'
 import { ipc } from '../ipc-client'
 
 import type { DraftStatus } from '../../shared/draft-status'
+import { registerWorkflow } from './workflow-registry'
 
 // ==========================================
 // 1. 结构与类型导出 (保留对外的向后兼容)
@@ -155,6 +156,7 @@ export function createChapterWorkflow(chapterInfo: ChapterInfo): WorkflowDefinit
         },
       },
     ],
+    rehydrateParams: { ...chapterInfo },
     onComplete: { mode: 'open', message: t('workflow.draftDone').replace('{n}', String(chapterInfo.chapterNumber)) },
   }
 }
@@ -163,6 +165,7 @@ export function createRefineOnlyWorkflow(params: RefineOnlyParams): WorkflowDefi
   return {
     type: 'chapter_creation',
     title: t('workflow.polishTitle').replace('{n}', String(params.chapterNumber)).replace('{title}', params.chapterTitle),
+    rehydrateParams: { ...params },
     steps: [
       {
         name: t('workflow.polish'),
@@ -188,6 +191,7 @@ export function createRefineFromReviewWorkflow(params: RefineFromReviewParams): 
   return {
     type: 'chapter_creation',
     title: t('workflow.reviewFixTitle').replace('{n}', String(params.chapterNumber)).replace('{title}', params.chapterTitle),
+    rehydrateParams: { ...params },
     steps: [
       {
         name: t('workflow.reviewFix'),
@@ -214,6 +218,7 @@ export function createReviewOnlyWorkflow(params: ReviewOnlyParams): WorkflowDefi
   return {
     type: 'chapter_creation',
     title: t('workflow.reviewTitle').replace('{n}', String(params.chapterNumber)).replace('{title}', params.chapterTitle),
+    rehydrateParams: { ...params },
     steps: [
       {
         name: t('workflow.review'),
@@ -239,6 +244,7 @@ export function createFinalizeWorkflow(params: FinalizeOnlyParams): WorkflowDefi
   return {
     type: 'chapter_creation',
     title: t('workflow.finalizeTitle').replace('{n}', String(params.chapterNumber)).replace('{title}', params.chapterTitle),
+    rehydrateParams: { ...params },
     steps: [
       {
         name: t('workflow.finalize'),
@@ -297,6 +303,7 @@ export function createRepairFinalizeWorkflow(chapterNumber: number): WorkflowDef
   return {
     type: 'chapter_creation',
     title: t('workflow.repairTitle').replace('{n}', String(chapterNumber)),
+    rehydrateParams: { chapterNumber },
     steps: [
       {
         name: t('workflow.repair'),
@@ -340,3 +347,13 @@ export function createRepairFinalizeWorkflow(chapterNumber: number): WorkflowDef
     onComplete: { mode: 'open', message: t('workflow.postProcessFix').replace('{n}', String(chapterNumber)) },
   }
 }
+
+// ===== 顶层自注册（rehydrate 重建，L2 任务6）=====
+// 6 个工厂都产出 type 'chapter_creation'，registry 按 type 单工厂映射——最后注册的
+// createChapterWorkflow（写稿主流程）对这个 type 生效；其余 5 个子流程注册但被同 type 覆盖。
+registerWorkflow('chapter_creation', (p) => createRefineOnlyWorkflow(p as unknown as RefineOnlyParams))
+registerWorkflow('chapter_creation', (p) => createRefineFromReviewWorkflow(p as unknown as RefineFromReviewParams))
+registerWorkflow('chapter_creation', (p) => createReviewOnlyWorkflow(p as unknown as ReviewOnlyParams))
+registerWorkflow('chapter_creation', (p) => createFinalizeWorkflow(p as unknown as FinalizeOnlyParams))
+registerWorkflow('chapter_creation', (p) => createRepairFinalizeWorkflow((p as { chapterNumber: number }).chapterNumber))
+registerWorkflow('chapter_creation', (p) => createChapterWorkflow(p as unknown as ChapterInfo))

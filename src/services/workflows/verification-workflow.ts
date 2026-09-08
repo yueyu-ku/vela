@@ -13,6 +13,7 @@ import { loadDirectoryBlueprints, type ChapterBlueprint } from './directory-work
 import { FillGapsCommand } from './commands/fill-gaps.command'
 import { generateVerificationReport, type BlueprintGap } from '../blueprint-verification-service'
 import type { ProjectCoreData } from '../../../electron/repositories/project-core-repository'
+import { registerWorkflow } from './workflow-registry'
 
 export interface VerificationWorkflowParams {
   /** 是否自动补全缺口（true = 扫描 + 补全，false = 仅扫描） */
@@ -103,6 +104,7 @@ export function createVerificationWorkflow(
 
   return {
     type: 'post_process',
+    rehydrateParams: { ...params },
     title: params.autoFill ? t('workflow.verifyTitle') : t('workflow.verifyTitleOnly'),
     steps,
     onComplete: {
@@ -113,3 +115,6 @@ export function createVerificationWorkflow(
     },
   }
 }
+
+// 顶层自注册（rehydrate 重建，L2 任务6）
+registerWorkflow('post_process', (p) => createVerificationWorkflow(p as VerificationWorkflowParams))

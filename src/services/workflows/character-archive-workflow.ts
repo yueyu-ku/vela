@@ -13,7 +13,8 @@ import {
 } from '../character-archive'
 import { parseAliases } from '../character-normalize'
 import { runPostProcessPipeline, readPostProcessStatus, getFailedStepLabels, type PostProcessStep } from './workflow-utils'
-import type { StepCallbacks } from '../../stores/workflow-store'
+import { registerWorkflow } from './workflow-registry'
+import type { StepCallbacks, WorkflowDefinition } from '../../stores/workflow-store'
 import type { CharacterData } from '../../../electron/repositories/character-repository'
 
 /**
@@ -120,76 +121,95 @@ async function extractBatch(
   }
 }
 
+export interface CharacterArchiveWorkflowParams {
+  projectPath: string
+  nameFilter?: string
+}
+
+/** 定稿正文 → 角色档案 工作流定义工厂（可 rehydrate；§5.2 由 runCharacterArchive 重构而来） */
+export function createCharacterArchiveWorkflow(params: CharacterArchiveWorkflowParams): WorkflowDefinition {
+  const { projectPath, nameFilter } = params
+  return {
+    type: 'post_process',
+    title: t('workflow.archiveTitle'),
+    rehydrateParams: { projectPath, nameFilter },
+    steps: [{
+      name: t('workflow.archiveSteps'),
+      description: t('workflow.archiveStepsDesc'),
+      executor: async (_step, _ctx, callbacks) => {
+        const allChars = (await ipc.invoke('db:character-get-all')) as unknown as CharacterData[]
+        const targets = nameFilter ? allChars.filter(c => c.name === nameFilter) : allChars
+        const pending = targets.filter(c => hasBlankArchiveFields(c as unknown as Record<string, unknown>))
+        const skipped = targets.length - pending.length
+        if (skipped > 0) {
+          callbacks.log(t('log.archiveSkipped').replace('{n}', String(skipped)))
+        }
+        if (pending.length === 0) {
+          callbacks.log(t('log.archiveAllComplete'))
+          return
+        }
+        callbacks.log(t('log.archiveStart').replace('{n}', String(pending.length)))
+
+        // 全部定稿章节正文（draft-get-finalized 仅返回 meta，正文经 draft-get-full 按 id 补取）
+        const chapterNumbers = (await ipc.invoke('db:draft-get-all-chapter-numbers')) as number[]
+        const chapters: ChapterContent[] = []
+        for (const n of [...chapterNumbers].sort((a, b) => a - b)) {
+          const meta = await ipc.invoke('db:draft-get-finalized', n) as { id: number; content?: string } | null
+          if (!meta) continue
+          const full = await ipc.invoke('db:draft-get-full', meta.id) as { content?: string } | null
+          if (full?.content) chapters.push({ chapterNumber: n, content: full.content })
+        }
+        if (chapters.length === 0) throw new Error(t('error.noFinalizedChapters'))
+
+        // 全角色注册名（前缀碰撞过滤）
+        const registryNames = allChars.map(c => c.name).filter(Boolean)
+
+        // 分批构建管线步骤（dependsOn 链 → 串行；critical=false → 批次失败不阻断后续）
+        const batchSteps: PostProcessStep[] = []
+        for (let i = 0; i < pending.length; i += ARCHIVE_BATCH_SIZE) {
+          const batch = pending.slice(i, i + ARCHIVE_BATCH_SIZE)
+          const batchNo = i / ARCHIVE_BATCH_SIZE + 1
+          const total = Math.ceil(pending.length / ARCHIVE_BATCH_SIZE)
+          batchSteps.push({
+            key: `archive_batch_${batchNo}`,
+            label: t('workflow.archiveBatch').replace('{n}', String(batchNo)).replace('{total}', String(total)),
+            critical: false,
+            dependsOn: batchNo > 1 ? [`archive_batch_${batchNo - 1}`] : [],
+            executor: async (cb) => { await extractBatch(batch, chapters, registryNames, cb) },
+          })
+        }
+
+        // 接入后处理管线：run 落库 + 每批重试 2 次 + 失败标记
+        await runPostProcessPipeline(projectPath, ARCHIVE_SCOPE, t('workflow.archiveTitle'), batchSteps, callbacks, {
+          retryCount: 2,
+        })
+
+        // 失败批次汇总日志（可诊断：失败角色仍在 pending，下次运行自动重试）
+        const status = await readPostProcessStatus(projectPath, ARCHIVE_SCOPE)
+        if (status) {
+          const failedLabels = getFailedStepLabels(status)
+          if (failedLabels.length > 0) {
+            callbacks.log(t('log.archiveFailedSummary').replace('{n}', String(failedLabels.length)))
+          }
+        }
+
+        // 刷新角色卡（定稿档案写入后各面板重载角色数据）
+        const { globalEventBus } = await import('../../shared/event-bus')
+        globalEventBus.emit('REFRESH_RESOURCE', { resources: ['characterCards'] })
+      },
+    }],
+  }
+}
+
+/**
+ * 定稿正文 → 角色档案 工作流启动入口（fire-and-forget；§5.2 重构后仍保持原调用签名）
+ * 现为薄包装：UI 调用点不变，行为经 createCharacterArchiveWorkflow 工厂重建，可 rehydrate。
+ */
 export function runCharacterArchive(projectPath: string, nameFilter?: string): void {
   import('../../stores/workflow-store').then(async ({ useWorkflowStore }) => {
-    await useWorkflowStore.getState().startWorkflow({
-      type: 'post_process',
-      title: t('workflow.archiveTitle'),
-      steps: [{
-        name: t('workflow.archiveSteps'),
-        description: t('workflow.archiveStepsDesc'),
-        executor: async (_step, _ctx, callbacks) => {
-          const allChars = (await ipc.invoke('db:character-get-all')) as unknown as CharacterData[]
-          const targets = nameFilter ? allChars.filter(c => c.name === nameFilter) : allChars
-          const pending = targets.filter(c => hasBlankArchiveFields(c as unknown as Record<string, unknown>))
-          const skipped = targets.length - pending.length
-          if (skipped > 0) {
-            callbacks.log(t('log.archiveSkipped').replace('{n}', String(skipped)))
-          }
-          if (pending.length === 0) {
-            callbacks.log(t('log.archiveAllComplete'))
-            return
-          }
-          callbacks.log(t('log.archiveStart').replace('{n}', String(pending.length)))
-
-          // 全部定稿章节正文（draft-get-finalized 仅返回 meta，正文经 draft-get-full 按 id 补取）
-          const chapterNumbers = (await ipc.invoke('db:draft-get-all-chapter-numbers')) as number[]
-          const chapters: ChapterContent[] = []
-          for (const n of [...chapterNumbers].sort((a, b) => a - b)) {
-            const meta = await ipc.invoke('db:draft-get-finalized', n) as { id: number; content?: string } | null
-            if (!meta) continue
-            const full = await ipc.invoke('db:draft-get-full', meta.id) as { content?: string } | null
-            if (full?.content) chapters.push({ chapterNumber: n, content: full.content })
-          }
-          if (chapters.length === 0) throw new Error(t('error.noFinalizedChapters'))
-
-          // 全角色注册名（前缀碰撞过滤）
-          const registryNames = allChars.map(c => c.name).filter(Boolean)
-
-          // 分批构建管线步骤（dependsOn 链 → 串行；critical=false → 批次失败不阻断后续）
-          const batchSteps: PostProcessStep[] = []
-          for (let i = 0; i < pending.length; i += ARCHIVE_BATCH_SIZE) {
-            const batch = pending.slice(i, i + ARCHIVE_BATCH_SIZE)
-            const batchNo = i / ARCHIVE_BATCH_SIZE + 1
-            const total = Math.ceil(pending.length / ARCHIVE_BATCH_SIZE)
-            batchSteps.push({
-              key: `archive_batch_${batchNo}`,
-              label: t('workflow.archiveBatch').replace('{n}', String(batchNo)).replace('{total}', String(total)),
-              critical: false,
-              dependsOn: batchNo > 1 ? [`archive_batch_${batchNo - 1}`] : [],
-              executor: async (cb) => { await extractBatch(batch, chapters, registryNames, cb) },
-            })
-          }
-
-          // 接入后处理管线：run 落库 + 每批重试 2 次 + 失败标记
-          await runPostProcessPipeline(projectPath, ARCHIVE_SCOPE, t('workflow.archiveTitle'), batchSteps, callbacks, {
-            retryCount: 2,
-          })
-
-          // 失败批次汇总日志（可诊断：失败角色仍在 pending，下次运行自动重试）
-          const status = await readPostProcessStatus(projectPath, ARCHIVE_SCOPE)
-          if (status) {
-            const failedLabels = getFailedStepLabels(status)
-            if (failedLabels.length > 0) {
-              callbacks.log(t('log.archiveFailedSummary').replace('{n}', String(failedLabels.length)))
-            }
-          }
-
-          // 刷新角色卡（定稿档案写入后各面板重载角色数据）
-          const { globalEventBus } = await import('../../shared/event-bus')
-          globalEventBus.emit('REFRESH_RESOURCE', { resources: ['characterCards'] })
-        },
-      }],
-    })
+    await useWorkflowStore.getState().startWorkflow(createCharacterArchiveWorkflow({ projectPath, nameFilter }))
   })
 }
+
+// 顶层自注册（rehydrate 重建，L2 任务6）：文件 lazy import 时触发注册
+registerWorkflow('post_process', (p) => createCharacterArchiveWorkflow(p as unknown as CharacterArchiveWorkflowParams))

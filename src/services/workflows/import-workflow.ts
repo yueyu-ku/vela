@@ -11,6 +11,7 @@
 import type { WorkflowDefinition } from '../../stores/workflow-store'
 import { t } from '../../shared/locale'
 import type { ImportedChapter } from './commands/import-novel.command'
+import { registerWorkflow } from './workflow-registry'
 
 export interface ImportWorkflowParams {
   /** 拆分后的章节数据 */
@@ -23,6 +24,7 @@ export interface ImportWorkflowParams {
 export function createImportWorkflow(params: ImportWorkflowParams): WorkflowDefinition {
   return {
     type: 'novel_import',
+    rehydrateParams: { ...params },
     title: t('workflow.importTitle').replace('{n}', String(params.chapters.length)),
     steps: [
       // ===== 步骤 1: 写入正文 + 构建知识库 =====
@@ -96,6 +98,9 @@ export function createImportWorkflow(params: ImportWorkflowParams): WorkflowDefi
     },
   }
 }
+
+// 顶层自注册（rehydrate 重建，L2 任务6）
+registerWorkflow('novel_import', (p) => createImportWorkflow(p as unknown as ImportWorkflowParams))
 
 /**
  * 预估导入的 Token 消耗

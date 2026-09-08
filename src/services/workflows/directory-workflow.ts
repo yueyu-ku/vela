@@ -6,6 +6,7 @@ import type { BlueprintData } from '../../../electron/repositories/blueprint-rep
 import { stripThinkingTags, extractAndRepairJSON, parseMarkdownTable } from './workflow-utils'
 import { renderLog } from '../render-logger'
 import { normalizeBlueprintRole } from '../blueprint-role'
+import { registerWorkflow } from './workflow-registry'
 
 // ==========================================
 // 1. 结构与类型导出 (保留对外的向后兼容)
@@ -315,6 +316,7 @@ export async function getBlueprintCount(): Promise<number> {
 export function createDirectoryWorkflow(params: DirectoryWorkflowParams = { mode: 'full' }): WorkflowDefinition {
   return {
     type: 'directory',
+    rehydrateParams: { ...params },
     title: params.mode === 'append'
       ? (params.startChapter
         ? t('workflow.dirTitleAppendFrom').replace('{n}', String(params.startChapter))
@@ -417,3 +419,6 @@ export function createDirectoryWorkflow(params: DirectoryWorkflowParams = { mode
     },
   }
 }
+
+// 顶层自注册（rehydrate 重建，L2 任务6）
+registerWorkflow('directory', (p) => createDirectoryWorkflow(p as unknown as DirectoryWorkflowParams))
