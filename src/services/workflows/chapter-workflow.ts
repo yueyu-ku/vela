@@ -165,7 +165,7 @@ export function createRefineOnlyWorkflow(params: RefineOnlyParams): WorkflowDefi
   return {
     type: 'chapter_creation',
     title: t('workflow.polishTitle').replace('{n}', String(params.chapterNumber)).replace('{title}', params.chapterTitle),
-    rehydrateParams: { ...params },
+    rehydrateParams: { ...params, __subflow: 'refine' },
     steps: [
       {
         name: t('workflow.polish'),
@@ -191,7 +191,7 @@ export function createRefineFromReviewWorkflow(params: RefineFromReviewParams): 
   return {
     type: 'chapter_creation',
     title: t('workflow.reviewFixTitle').replace('{n}', String(params.chapterNumber)).replace('{title}', params.chapterTitle),
-    rehydrateParams: { ...params },
+    rehydrateParams: { ...params, __subflow: 'refine_from_review' },
     steps: [
       {
         name: t('workflow.reviewFix'),
@@ -218,7 +218,7 @@ export function createReviewOnlyWorkflow(params: ReviewOnlyParams): WorkflowDefi
   return {
     type: 'chapter_creation',
     title: t('workflow.reviewTitle').replace('{n}', String(params.chapterNumber)).replace('{title}', params.chapterTitle),
-    rehydrateParams: { ...params },
+    rehydrateParams: { ...params, __subflow: 'review' },
     steps: [
       {
         name: t('workflow.review'),
@@ -244,7 +244,7 @@ export function createFinalizeWorkflow(params: FinalizeOnlyParams): WorkflowDefi
   return {
     type: 'chapter_creation',
     title: t('workflow.finalizeTitle').replace('{n}', String(params.chapterNumber)).replace('{title}', params.chapterTitle),
-    rehydrateParams: { ...params },
+    rehydrateParams: { ...params, __subflow: 'finalize' },
     steps: [
       {
         name: t('workflow.finalize'),
@@ -303,7 +303,7 @@ export function createRepairFinalizeWorkflow(chapterNumber: number): WorkflowDef
   return {
     type: 'chapter_creation',
     title: t('workflow.repairTitle').replace('{n}', String(chapterNumber)),
-    rehydrateParams: { chapterNumber },
+    rehydrateParams: { chapterNumber, __subflow: 'repair_finalize' },
     steps: [
       {
         name: t('workflow.repair'),
@@ -348,12 +348,12 @@ export function createRepairFinalizeWorkflow(chapterNumber: number): WorkflowDef
   }
 }
 
-// ===== 顶层自注册（rehydrate 重建，L2 任务6）=====
-// 6 个工厂都产出 type 'chapter_creation'，registry 按 type 单工厂映射——最后注册的
-// createChapterWorkflow（写稿主流程）对这个 type 生效；其余 5 个子流程注册但被同 type 覆盖。
-registerWorkflow('chapter_creation', (p) => createRefineOnlyWorkflow(p as unknown as RefineOnlyParams))
-registerWorkflow('chapter_creation', (p) => createRefineFromReviewWorkflow(p as unknown as RefineFromReviewParams))
-registerWorkflow('chapter_creation', (p) => createReviewOnlyWorkflow(p as unknown as ReviewOnlyParams))
-registerWorkflow('chapter_creation', (p) => createFinalizeWorkflow(p as unknown as FinalizeOnlyParams))
-registerWorkflow('chapter_creation', (p) => createRepairFinalizeWorkflow((p as { chapterNumber: number }).chapterNumber))
+// ===== 顶层自注册（rehydrate 重建，L2 任务6 修复 round 1）=====
+// 6 个工厂都产出 type 'chapter_creation'，registry per-type 多工厂 + match 按 __subflow 判别键选厂；
+// createChapterWorkflow（写稿主流程）作为兜底，最后注册且无 match（所有子流未命中时兜底）。
+registerWorkflow('chapter_creation', (p) => createRefineFromReviewWorkflow(p as unknown as RefineFromReviewParams), (p) => p.__subflow === 'refine_from_review')
+registerWorkflow('chapter_creation', (p) => createReviewOnlyWorkflow(p as unknown as ReviewOnlyParams), (p) => p.__subflow === 'review')
+registerWorkflow('chapter_creation', (p) => createFinalizeWorkflow(p as unknown as FinalizeOnlyParams), (p) => p.__subflow === 'finalize')
+registerWorkflow('chapter_creation', (p) => createRefineOnlyWorkflow(p as unknown as RefineOnlyParams), (p) => p.__subflow === 'refine')
+registerWorkflow('chapter_creation', (p) => createRepairFinalizeWorkflow((p as { chapterNumber: number }).chapterNumber), (p) => p.__subflow === 'repair_finalize')
 registerWorkflow('chapter_creation', (p) => createChapterWorkflow(p as unknown as ChapterInfo))

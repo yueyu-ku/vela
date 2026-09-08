@@ -132,7 +132,7 @@ export function createCharacterArchiveWorkflow(params: CharacterArchiveWorkflowP
   return {
     type: 'post_process',
     title: t('workflow.archiveTitle'),
-    rehydrateParams: { projectPath, nameFilter },
+    rehydrateParams: { projectPath, nameFilter, __subflow: 'archive' },
     steps: [{
       name: t('workflow.archiveSteps'),
       description: t('workflow.archiveStepsDesc'),
@@ -211,5 +211,5 @@ export function runCharacterArchive(projectPath: string, nameFilter?: string): v
   })
 }
 
-// 顶层自注册（rehydrate 重建，L2 任务6）：文件 lazy import 时触发注册
-registerWorkflow('post_process', (p) => createCharacterArchiveWorkflow(p as unknown as CharacterArchiveWorkflowParams))
+// 顶层自注册（rehydrate 重建，L2 任务6 修复 round 1）：文件 lazy import 时触发注册
+registerWorkflow('post_process', (p) => createCharacterArchiveWorkflow(p as unknown as CharacterArchiveWorkflowParams), (p) => p.__subflow === 'archive')

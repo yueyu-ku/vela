@@ -25,7 +25,7 @@ export function createMutualEvaluationWorkflow(
 ): WorkflowDefinition {
   return {
     type: 'post_process',
-    rehydrateParams: { ...params },
+    rehydrateParams: { ...params, __subflow: 'mutual_eval' },
     title: t('workflow.mutualTitle').replace('{n}', String(params.chapterNumber)),
     steps: [
       {
@@ -108,5 +108,5 @@ export function createMutualEvaluationWorkflow(
   }
 }
 
-// 顶层自注册（rehydrate 重建，L2 任务6）
-registerWorkflow('post_process', (p) => createMutualEvaluationWorkflow(p as unknown as MutualEvaluationParams))
+// 顶层自注册（rehydrate 重建，L2 任务6 修复 round 1）
+registerWorkflow('post_process', (p) => createMutualEvaluationWorkflow(p as unknown as MutualEvaluationParams), (p) => p.__subflow === 'mutual_eval')

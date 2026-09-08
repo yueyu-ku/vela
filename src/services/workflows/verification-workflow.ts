@@ -104,7 +104,7 @@ export function createVerificationWorkflow(
 
   return {
     type: 'post_process',
-    rehydrateParams: { ...params },
+    rehydrateParams: { ...params, __subflow: 'verification' },
     title: params.autoFill ? t('workflow.verifyTitle') : t('workflow.verifyTitleOnly'),
     steps,
     onComplete: {
@@ -116,5 +116,5 @@ export function createVerificationWorkflow(
   }
 }
 
-// 顶层自注册（rehydrate 重建，L2 任务6）
-registerWorkflow('post_process', (p) => createVerificationWorkflow(p as VerificationWorkflowParams))
+// 顶层自注册（rehydrate 重建，L2 任务6 修复 round 1）
+registerWorkflow('post_process', (p) => createVerificationWorkflow(p as VerificationWorkflowParams), (p) => p.__subflow === 'verification')

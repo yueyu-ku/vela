@@ -429,7 +429,7 @@ export function createArchCharacterExtractWorkflow(params: ArchCharacterExtractW
   return {
     type: 'post_process',
     title: t('workflow.postProcessCards'),
-    rehydrateParams: { projectPath, characterDynamicsContent, genre },
+    rehydrateParams: { projectPath, characterDynamicsContent, genre, __subflow: 'arch_extract' },
     steps: [
       {
         name: t('workflow.extractCards'),
@@ -476,13 +476,17 @@ export function createRepairArchCharacterCardsWorkflow(params: RepairArchCharact
   return {
     type: 'post_process',
     title: t('workflow.fixCards'),
-    rehydrateParams: { projectPath },
+    rehydrateParams: { projectPath, __subflow: 'repair_cards' },
     steps: [
       {
         name: t('workflow.retryCards'),
         description: t('workflow.retryCardsDesc'),
         executor: async (_step, _ctx, callbacks) => {
-          // charactersArch/genre 运行时 DB/项目解析（§5.2：让工厂重建时同样查库）
+          // charactersArch/genre 运行时 DB/项目解析（§5.2：让工厂重建时同样查库）。
+          // 【已知限制·review Important 接受】原 repairArchCharacterCards 在 startWorkflow 前校验
+          // （无 core.charactersArch / 无 project 则 throw、工作流不启动）；因 WorkflowRehydrateFactory
+          // 须同步返回 definition、无法在工厂内同步 await 查库，故校验迁到步骤执行时触发（步骤运行即 fail）。
+          // 当前无该函数调用点，无行为回归，不恢复启动前校验。
           const core = await ipc.invoke('db:project-core-get')
           if (!core?.charactersArch || core.charactersArch.length < 50) throw new Error(t('error.cannotExtractCards'))
           const project = useProjectStore.getState().currentProject
@@ -512,6 +516,6 @@ export async function repairArchCharacterCards(projectPath: string): Promise<voi
 // config_generation 不注册：params 含 onGenerated 函数回调，无法经 (type+serialized params) 重建 → 恢复走兜底
 // ==========================================
 registerWorkflow('architecture_generation', (p) => createArchitectureWorkflow(p as ArchitectureWorkflowParams))
-registerWorkflow('post_process', (p) => createArchCharacterExtractWorkflow(p as unknown as ArchCharacterExtractWorkflowParams))
-registerWorkflow('post_process', (p) => createRepairArchCharacterCardsWorkflow(p as unknown as RepairArchCharacterCardsWorkflowParams))
+registerWorkflow('post_process', (p) => createArchCharacterExtractWorkflow(p as unknown as ArchCharacterExtractWorkflowParams), (p) => p.__subflow === 'arch_extract')
+registerWorkflow('post_process', (p) => createRepairArchCharacterCardsWorkflow(p as unknown as RepairArchCharacterCardsWorkflowParams), (p) => p.__subflow === 'repair_cards')
 
