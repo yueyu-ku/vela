@@ -60,14 +60,15 @@
 
 ### B 档（中，需设计）
 - **提议 1 第一步**：RefineParagraphs 封装为 agent tool（读选区 + 生成改写 diff + 返回）。低成本。
-- **提议 3 第一步（dsh-context 面板）**：Context 面板（复用 context-builder/usage/ccr 数据）+ /context 命令。中成本。
+- **提议 3 第一步（context 面板低成本路径）**：只做「Current Context 构成」一卡（基于现有 context-builder + usage-store 直构）+ /context 命令。**约 3-5 人日**（dsh-context 全量事件流 25-40 人日留 C 档，见 §4）。
 - **「任务 vs 工作流输出」展示归属设计**（§5）。
-- **工作量**：中高；**风险**：中；**依赖**：A 档后的 agent 基建。
+- **工作量**：中高（B 档主体 = 工具化 + 一卡面板 + 展示归属）；**风险**：中；**依赖**：A 档后的 agent 基建。
 
 ### C 档（重，架构级）
 - **提议 3 多 agent 拆分派发**：编排层（主 agent 拆任务 → 子 agent → 汇合/评审）。高成本。
 - **提议 1 在位编辑流**：agent 工具改编辑器内容（复用 L1 inline-accept CM 通道思想）。中高成本。
-- **提议 2 hindsight 长期记忆**：记忆 bank + 知识页 + 自动摄入 + 反思 + 注入 agent context。高成本（价值最高，最重）。
+- **提议 2 hindsight 长期记忆**：retention/consolidation 引擎 15-25 人日 + harness 接点 3-5 人日（总 ~18-28 人日；关键难点 = 自建「LLM 事实提取→知识页合成」引擎 + 按 project 隔离 + 会话/提交摄入接点）。
+- **dsh-context 全量**（若做）：自建规范化会话事件流 + 投影管道 + 9 卡 UI（~25-40 人日；**关键依赖** = 可审计的 NovelForge 规范化会话/文本书写事件流）。
 - **Agent 输出样式**（DSH 主流样式）：低-中成本，可穿插 C 档。
 - **工作量**：高；**风险**：中高；**依赖**：B 档后的 agent/context 基建。
 
@@ -78,14 +79,22 @@ A 档（模型路由+自动拉取） ──→ B 档（工具化 + context 面�
 ```
 - A 档独立先行；B 档依赖 A 的 agent 基建成熟；C 档最重最后。
 
-## 4. DSH 插件移植评估（实现阶段细化）
+## 4. DSH 插件移植评估（源码级细化，来自源码分析）
 
-> 用户裁定「移植完整」：实现时把 hindsight/dsh-context 源码拉取到 `D:\Code\deepseek-harness\local-plugins` 学习其数据结构/接点，按 NovelForge 现状自建同能力。评审阶段成本以行为契约级估计如下。
+> 已拉取 hindsight（v0.5.1）/ dsh-context（v0.46.0）源码到 `.superpowers/sdd/plugin-source-study/` 分析。二者都不是「复制代码能落地」，核心在自建引擎/事件流。
 
-| 插件 | 移植到 NovelForge | 复用现有 | 需自建 | 成本 |
-|---|---|---|---|---|
-| hindsight-coding-agents | 记忆 bank + 知识页 + 自动摄入 + 反思 + 注入 agent context | LanceDB 向量库 + RAG 检索 + 知识库/CCR | 记忆 bank schema、知识页模型、会话/提交自动摄入接点、反思触发、知识页编辑 UI、检索注入 agent context | 高 |
-| dsh-context | Context 面板 + /context 命令（分类/演进/压缩事件/统计） | context-builder、context-usage、ccr-summary | 面板 UI、数据聚合/时间线 | 中 |
+### hindsight-coding-agents（长期记忆）—— 中等难度，约 18-28 人日
+- **架构**：client→server 记忆系统，接入层不存记忆，调 HTTP（cloud/self-hosted/daemon 后端）。NovelForge 二选一：①内嵌 server/daemon；②把 retain/recall/reflect **重写到自己的 LanceDB + LLM 路由**（推荐，本地优先，成本低）。
+- **harness 适配层极小**（3-5 人日）：`ChatReader`(读会话) + `HarnessAdapter.createRuntime`(绑 hook)。DSH 只绑 4 事件：session-start→seed、pre-step→recall+注入、turn-stopping→写回、ctx.tools→注册 `hindsight_*`。NovelForge 等价接点 = 打开项目(seed) / context-builder 组装 system prompt(recall+注入) / 对话完成保存点(写回) / agent 工具注册。
+- **真正成本**（15-25 人日）：LLM 事实提取→归纳→知识页合成 的 **retention/consolidation 引擎**（NovelForge 目前只有 LanceDB 检索 + LLM 路由，需自建）。
+- **bank 隔离**：`coding-agent::{gitProject}`（harness 中立、worktree-aware）→ NovelForge 改按 project 隔离。
+- **需自建**：记忆 bank schema、知识页模型、自动摄入接点（会话/提交捕获）、recall/reflect 重写到 LanceDB+LLM、知识页编辑 UI、注入 agent context。
+
+### dsh-context（context 面板）—— 高难度（全量约 25-40 人日）
+- **深度耦合 DSH**：运行时依赖全是 harness 注入 peer（cordis / dsh-session / dsh-settings / dsh-client-ui-primitives / dsh-token-meter 投影）——NovelForge 全无，需自建整套。
+- **关键依赖**：一个可审计的「**NovelForge 规范化会话/文本书写事件流**」（user/assistant/tool/request/header/step/compaction/plan·mode）→ 投影注册表+折叠+推送 → token 构成拆分。
+- **自建**：规范化会话事件日志、投影注册表/折叠/推送、token 构成拆分；UI 面板 9 卡（Composition/History/Trend/Browser/Events/File Activity/Agent Network 等）。
+- **低成本路径**（3-5 人日）：只做「**Current Context 构成**」一卡，基于现有 context-builder + usage-store 直构（不带事件流）。
 
 ## 5. 「任务 vs 工作流输出」展示归属（设计原则）
 
@@ -109,7 +118,7 @@ A 档（模型路由+自动拉取） ──→ B 档（工具化 + context 面�
 ## 7. 下一步
 
 - 按用户优先级（全部排期）→ 建议**先 A 档**：细化为 SDD 计划（model-router 扩展 + provider /models + 设置 UI），worktree + implementer/reviewer 执行。
-- hindsight/dsh-context 实现阶段拉源码（`D:\Code\deepseek-harness\local-plugins`）细化数据结构。
+- hindsight/dsh-context 源码已拉取到 `.superpowers/sdd/plugin-source-study/`（含逐文件分析报告 `plugin-study-report.md`）；实现 B/C 档时可直接参照，无需再拉 D:\Code。
 - B/C 档在 A 档后按评审方向细化。
 
 ---
