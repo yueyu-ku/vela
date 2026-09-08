@@ -276,4 +276,17 @@ describe('sanitizeCheckpointData', () => {
     })
     expect(out.savedAt).toBe('')
   })
+
+  it('L2 v2：保留 runDefs/contextData 重建信息（non-null 纯对象才带，坏值省略）', () => {
+    const runDefs = { 'run-1': { type: 'post_process', params: { seed: 'x' } } }
+    const contextData = { 'run-1': { shared: 'ctx' } }
+    const out = sanitizeCheckpointData({ activeRuns: [makeRun()], waitingRuns: {}, savedAt: '', runDefs, contextData })!
+    expect(out.runDefs).toEqual(runDefs)
+    expect(out.contextData).toEqual(contextData)
+
+    // 非对象/数组 → 省略（shape 防御不带上坏值）
+    const bad = sanitizeCheckpointData({ activeRuns: [makeRun()], waitingRuns: {}, savedAt: '', runDefs: 'x', contextData: [] })
+    expect(bad!.runDefs).toBeUndefined()
+    expect(bad!.contextData).toBeUndefined()
+  })
 })

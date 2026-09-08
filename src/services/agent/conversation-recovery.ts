@@ -25,7 +25,7 @@
  */
 
 import type { AgentMessage } from '../../stores/agent-store'
-import type { CheckpointData, WorkflowRun, WorkflowStep } from '../../stores/workflow-store'
+import type { CheckpointData, WorkflowRun, WorkflowStep, WorkflowType, WorkflowParams } from '../../stores/workflow-store'
 
 // ===== 文本残片清理（tool_call / tool_result / think 标签） =====
 
@@ -118,11 +118,20 @@ export function sanitizeCheckpointData(raw: unknown): CheckpointData | null {
     if (s) activeRuns.push(s)
   }
 
-  return {
+  const out: CheckpointData = {
     activeRuns,
     waitingRuns: sanitizeWaitingRuns(data.waitingRuns),
     savedAt: typeof data.savedAt === 'string' ? data.savedAt : '',
   }
+  // L2 v2：保留重建信息（runDefs / contextData）。shape 防御：仅当 non-null 纯对象才带，否则省略——
+  // runDefs 是 type+params 快照、contextData 是 executor 跨步共享上下文，均非生成文本，不进 cleanupMessageText。
+  if (data.runDefs && typeof data.runDefs === 'object' && !Array.isArray(data.runDefs)) {
+    out.runDefs = data.runDefs as Record<string, { type: WorkflowType; params: WorkflowParams }>
+  }
+  if (data.contextData && typeof data.contextData === 'object' && !Array.isArray(data.contextData)) {
+    out.contextData = data.contextData as Record<string, Record<string, unknown>>
+  }
+  return out
 }
 
 function sanitizeCheckpointRun(run: unknown): WorkflowRun | null {

@@ -48,12 +48,12 @@ function saveCheckpoint(state: WorkflowState): void {
 async function loadCheckpoint(): Promise<CheckpointData | null> {
   try {
     const res = await ipc.invoke('db:checkpoint-load') as { data?: unknown }
-    if (res.data) return sanitizeAndPreserveMeta(res.data)
+    if (res.data) return sanitizeCheckpointData(res.data)
     // 兜底：DB 空 → 读旧 localStorage（存量迁移，L2 迁 DB 前的旧数据仍可恢复）
     try {
       const raw = localStorage.getItem(CHECKPOINT_KEY)
       if (raw) {
-        const legacy = sanitizeAndPreserveMeta(JSON.parse(raw))
+        const legacy = sanitizeCheckpointData(JSON.parse(raw))
         if (legacy && legacy.activeRuns.length > 0) void ipc.invoke('db:checkpoint-save', legacy).catch(() => {})
         return legacy
       }
@@ -62,25 +62,6 @@ async function loadCheckpoint(): Promise<CheckpointData | null> {
   } catch {
     return null
   }
-}
-
-/**
- * 净化 + 保留 L2 v2 重建信息。
- * sanitizeCheckpointData 只返回 {activeRuns, waitingRuns, savedAt}（它设计时无 runDefs/contextData），
- * 但 L2 v2 依赖 runDefs（rehydrate 重建 definition）与 contextData（断点上下文），在 DB/localStorage
- * 往返后不能丢失——净化形状防御后回填原 raw 的这两个字段（结构是参数快照，不入 cleanupMessageText 文本净化）。
- */
-function sanitizeAndPreserveMeta(raw: unknown): CheckpointData | null {
-  const cp = sanitizeCheckpointData(raw)
-  if (!cp || !raw || typeof raw !== 'object' || Array.isArray(raw)) return cp
-  const rawObj = raw as Record<string, unknown>
-  if (rawObj.runDefs && typeof rawObj.runDefs === 'object' && !Array.isArray(rawObj.runDefs)) {
-    cp.runDefs = rawObj.runDefs as Record<string, { type: WorkflowType; params: WorkflowParams }>
-  }
-  if (rawObj.contextData && typeof rawObj.contextData === 'object' && !Array.isArray(rawObj.contextData)) {
-    cp.contextData = rawObj.contextData as Record<string, Record<string, unknown>>
-  }
-  return cp
 }
 
 function clearCheckpoint(): void {
@@ -252,6 +233,9 @@ const activeContexts = new Map<string, WorkflowContext>()
 const continueResolveRefs = new Map<string, () => void>()
 /** L2：run 可重建参数快照（type + params → rehydrateWorkflow；Task 5 saveCheckpoint 消费，本任务先引入） */
 const runDefs = new Map<string, { type: WorkflowType; params: WorkflowParams }>()
+/** L2 v2（IMP-1）：跨重启 waiting 续跑的断点上下文——restoreCheckpoint 时从 checkpoint contextData 快照；
+ *  waiting run 恢复时无 activeContexts 条目，confirmContinue 重放用它恢复 ctx.data（否则 ?? {} 恒为空丢共享数据）。 */
+const resumeContextData = new Map<string, Record<string, unknown>>()
 
 // ===== appendText 流式缓冲（共享限频调度器） =====
 // LLM 流式 chunk 逐片 setState 会高频重渲染整个面板，阻塞主线程。
@@ -397,7 +381,9 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
         import('../services/workflows/workflow-registry').then(async m => {
           const def = m.rehydrateWorkflow(r.type, r.rehydrateParams ?? {})
           if (def) {
-            await executeRunFromIndex(r, def, waitIdx + 1, activeContexts.get(targetId)?.data ?? {})
+            // IMP-1：跨重启 waiting 续跑无 activeContexts 条目 → 用 restoreCheckpoint 快照的
+            // resumeContextData 恢复 ctx.data（checkpoint contextData 保存的跨步共享数据）。
+            await executeRunFromIndex(r, def, waitIdx + 1, activeContexts.get(targetId)?.data ?? resumeContextData.get(targetId) ?? {})
           }
         }).catch(() => {})
       }
@@ -476,6 +462,7 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
       })
       get().addLog('warn', '[Cancel] Workflow cancelled')
       clearAppendBuffers(runId)
+      resumeContextData.delete(runId)
       // M2：取消 = 任务级清理（用户不再需要该任务输出；崩溃恢复窗口关闭）
       deleteRunOutput(runId)
       saveCheckpoint(get())
@@ -501,6 +488,7 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
         }
       })
       get().addLog('warn', '[Cancel] All workflows cancelled')
+      resumeContextData.clear()
       clearCheckpoint()
       // M2：取消全部 = 逐个任务级清理（被取消 run 的输出文件不再保留）
       for (const id of allRunIds) deleteRunOutput(id)
@@ -526,6 +514,8 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
     //   不可重建 → 旧兜底（waiting→failed 提示重跑 / running→paused 可取消重跑）。
     const cp = await loadCheckpoint()
     if (!cp || cp.activeRuns.length === 0) return cp
+    // IMP-1：清旧断点上下文（多次恢复防残留），随后按 run 快照 checkpoint 的 contextData
+    resumeContextData.clear()
     const interruptedWaitingIds = new Set(Object.keys(cp.waitingRuns ?? {}))
     // 动态 import 规避 store←→registry 静态循环（registry type-only import store，store 运行时 import registry）
     const m = await import('../services/workflows/workflow-registry')
@@ -533,6 +523,8 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
     // 恢复为「等待确认」的 run（其 waitingAfterStepIndex 需保留给 confirmContinue 定位断点）
     const keptWaitingIds: string[] = []
     for (const r of cp.activeRuns) {
+      // IMP-1：等待确认 run 无 activeContexts 条目，confirmContinue 重放靠此重建 ctx.data
+      resumeContextData.set(r.id, cp.contextData?.[r.id] ?? {})
       const def = m.rehydrateWorkflow(r.type, cp.runDefs?.[r.id]?.params ?? {})
       const isWaiting = interruptedWaitingIds.has(r.id)
       if (def) {
@@ -802,6 +794,7 @@ export async function executeRunFromIndex(
   // 清理上下文与流式缓冲
   activeContexts.delete(run.id)
   continueResolveRefs.delete(run.id)
+  resumeContextData.delete(run.id)
   clearAppendBuffers(run.id)
   // M2 任务级清理：run 已移入历史（完成/失败），删除其输出目录（崩溃恢复窗口已过）
   deleteRunOutput(run.id)

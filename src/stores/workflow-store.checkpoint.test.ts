@@ -32,22 +32,24 @@ const h = vi.hoisted(() => {
     }
     return { success: true }
   })
-  return { dbMap, invoke, seen: [] as string[] }
+  return { dbMap, invoke, seen: [] as string[], seenData: [] as Record<string, unknown>[] }
 })
 
 vi.mock('../services/ipc-client', () => ({
   ipc: { invoke: (...a: unknown[]) => h.invoke(...(a as [])) },
 }))
 
-// 注册一个可重建的 workflow（type: post_process），executor 记录运行步骤供断言断点重放
+// 注册一个可重建的 workflow（type: post_process），executor 记录运行步骤供断言断点重放 +
+// 记录 executor 读到的 ctx.data（IMP-1：waiting 续跑须消费 checkpoint contextData，而非空）
 registerWorkflow('post_process', () => ({
   type: 'post_process',
   title: '后处理（L2 测试桩）',
   steps: ['a', 'b', 'c'].map((name) => ({
     name,
     description: name,
-    executor: async () => {
+    executor: async (_step, ctx) => {
       h.seen.push(name)
+      h.seenData.push({ ...ctx.data })
       return name
     },
   })),
@@ -97,6 +99,7 @@ async function waitFor(fn: () => boolean, timeout = 2000): Promise<void> {
 beforeEach(() => {
   h.dbMap.clear()
   h.seen.length = 0
+  h.seenData.length = 0
   localStorage.clear()
   resetStore()
 })
@@ -138,6 +141,8 @@ describe('workflow-checkpoint v2（L2）', () => {
     const finalRun = useWorkflowStore.getState().history.find((r) => r.id === 'run-wait')
     expect(finalRun?.status).toBe('completed')
     expect(h.seen).toEqual(['c'])
+    // IMP-1：waiting 续跑消费 checkpoint 的 contextData（executor 读到断点共享数据而非空）
+    expect(h.seenData).toEqual([{ shared: 'ctx' }])
   })
 
   it('restoreCheckpoint v2：running 中断自动重放（从 currentStepIndex 立即续跑）', async () => {
