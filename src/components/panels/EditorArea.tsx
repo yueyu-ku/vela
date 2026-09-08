@@ -109,6 +109,9 @@ function ProseEditorWrapper({
           content={tab.content ?? ''}
           filePath={tab.filePath}
           hideStatusBar
+          // QA 修复（正式稿只读）：vela://manuscript/{id} 是 DB 定稿行，只读保护定稿内容
+          // 不被误改/串库；物理路径终稿文件仍可编辑
+          editable={!tab.filePath?.startsWith('vela://manuscript/')}
           onCharCountChange={setWordCount}
           onChange={(text) => {
             // 同步 ref，供保存按钮使用
