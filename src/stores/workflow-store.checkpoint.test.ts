@@ -231,4 +231,89 @@ describe('workflow-checkpoint v2（L2）', () => {
     await expect(useWorkflowStore.getState().restoreCheckpoint()).resolves.toBeNull()
     expect(useWorkflowStore.getState().activeRuns).toHaveLength(0)
   })
+
+  // ===== L2 final review fix wave（final whole-branch review）=====
+
+  it('legacy checkpoint（runDefs 缺失）→ 走安全兜底非误路由（waiting→failed / running→paused，不自动重放）', async () => {
+    // registry 已注册 post_process（rehydrateWorkflow 恒可重建）；但 checkpoint 缺 runDefs
+    // （legacy pre-L2 localStorage 旧数据）→ 必须走 else 兜底，不得用空 params 命中工厂误路由。
+    const legacyRun = makeRun('run-legacy-missing', {
+      status: 'running',
+      currentStepIndex: 1,
+      steps: [
+        { id: 's0', name: 'a', description: 'a', status: 'completed', result: 'a', logs: [] },
+        { id: 's1', name: 'b', description: 'b', status: 'running', logs: [] },
+        { id: 's2', name: 'c', description: 'c', status: 'pending', logs: [] },
+      ],
+    })
+    const cp = {
+      activeRuns: [legacyRun],
+      waitingRuns: {},
+      savedAt: '2026-09-05T00:05:00.000Z',
+      // 无 runDefs：模拟 legacy pre-L2 localStorage checkpoint
+    }
+    h.dbMap.set('cp', JSON.stringify(cp))
+
+    await useWorkflowStore.getState().restoreCheckpoint()
+    const run = useWorkflowStore.getState().activeRuns.find((r) => r.id === 'run-legacy-missing')
+    expect(run?.status).toBe('paused') // running 走兜底 → paused，而非误路由自动重放
+    expect(h.seen).toEqual([]) // 未被重放（不重新生成内容）
+  })
+
+  it('legacy checkpoint（runDefs 缺失）novel_import → 不调工厂不抛 TypeError，整批 restore 正常 resolve', async () => {
+    // 复现真实 novel_import 工厂：params.chapters 缺失会抛（String(params.chapters.length) → undefined）
+    registerWorkflow('novel_import', (p) => {
+      if (!p.chapters) throw new TypeError('chapters undefined')
+      return { type: 'novel_import', title: '导入', steps: [] }
+    })
+    const legacyRun = makeRun('run-import', {
+      type: 'novel_import' as const,
+      status: 'running',
+      currentStepIndex: 0,
+      steps: [{ id: 'i-s0', name: 'a', description: 'a', status: 'completed', result: 'a', logs: [] }],
+    })
+    const cp = {
+      activeRuns: [legacyRun],
+      waitingRuns: {},
+      savedAt: '2026-09-05T00:06:00.000Z',
+      // 无 runDefs
+    }
+    h.dbMap.set('cp', JSON.stringify(cp))
+
+    // runDefs 缺失 → 不得调用工厂（否则 TypeError）→ 整批 restore 必须 resolve（不 reject）+ 走兜底
+    await expect(useWorkflowStore.getState().restoreCheckpoint()).resolves.not.toBeNull()
+    const run = useWorkflowStore.getState().activeRuns.find((r) => r.id === 'run-import')
+    expect(run?.status).toBe('paused')
+    expect(h.seen).toEqual([])
+  })
+
+  it('running 重放 startIndex>=steps.length（末步已完成与 run 完成间崩溃）→ completed 不 stuck running', async () => {
+    // post_process 定义 3 步（a/b/c）；run 已完成全部步骤（currentStepIndex=3 >= steps.length=3）。
+    // 先入列（set activeRuns）再 fire executeRunFromIndex → 零迭代同步完成，finalRun 命中 → completed 入历史。
+    const finishedRun = makeRun('run-done', {
+      status: 'running',
+      currentStepIndex: 3,
+      steps: [
+        { id: 's0', name: 'a', description: 'a', status: 'completed', result: 'a', logs: [] },
+        { id: 's1', name: 'b', description: 'b', status: 'completed', result: 'b', logs: [] },
+        { id: 's2', name: 'c', description: 'c', status: 'completed', result: 'c', logs: [] },
+      ],
+    })
+    const cp = {
+      activeRuns: [finishedRun],
+      waitingRuns: {},
+      savedAt: '2026-09-05T00:07:00.000Z',
+      runDefs: { 'run-done': { type: 'post_process', params: { seed: 'run-done' } } },
+    }
+    h.dbMap.set('cp', JSON.stringify(cp))
+
+    await useWorkflowStore.getState().restoreCheckpoint()
+    await waitFor(() => useWorkflowStore.getState().history.some((r) => r.id === 'run-done'))
+    const finalRun = useWorkflowStore.getState().history.find((r) => r.id === 'run-done')
+    expect(finalRun?.status).toBe('completed')
+    // 不再 stuck running：activeRuns 不残留该 run
+    expect(useWorkflowStore.getState().activeRuns.some((r) => r.id === 'run-done')).toBe(false)
+    // 零迭代重跑：无步骤被执行
+    expect(h.seen).toEqual([])
+  })
 })

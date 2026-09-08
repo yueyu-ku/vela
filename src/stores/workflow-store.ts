@@ -522,10 +522,19 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
     const restored: WorkflowRun[] = []
     // 恢复为「等待确认」的 run（其 waitingAfterStepIndex 需保留给 confirmContinue 定位断点）
     const keptWaitingIds: string[] = []
+    // running 中断需自动重放的 run：先统一入列（set activeRuns）再 fire executeRunFromIndex——
+    // 保证完成判定 finalRun 能命中；否则 startIndex>=steps.length（末步已完成与 run 完成间
+    // 崩溃/定义漂移）的同步零迭代路径会因 run 尚未入 activeRuns 而 finalRun undefined →
+    // 不计 completed/不触发 onComplete → run 永久 stuck running（final review Finding 2）。
+    const runningReplays: Array<{ rr: WorkflowRun; def: WorkflowDefinition; startIndex: number }> = []
     for (const r of cp.activeRuns) {
       // IMP-1：等待确认 run 无 activeContexts 条目，confirmContinue 重放靠此重建 ctx.data
       resumeContextData.set(r.id, cp.contextData?.[r.id] ?? {})
-      const def = m.rehydrateWorkflow(r.type, cp.runDefs?.[r.id]?.params ?? {})
+      // L2 final（§4.8）：runDefs 缺失（legacy pre-L2 localStorage checkpoint）→ 视为不可重建，走
+      // else 旧兜底，避免空 params 命中 r.type 的兜底工厂（如 chapter_creation 写稿）误路由重放，或
+      // novel_import 的 String(params.chapters.length) 解引用 undefined → TypeError 让整批 restore 拒绝。
+      const runDef = cp.runDefs?.[r.id]
+      const def = runDef ? m.rehydrateWorkflow(r.type, runDef.params) : null
       const isWaiting = interruptedWaitingIds.has(r.id)
       if (def) {
         // 可重建 → 真续跑：status 置 running（running 中断立即自动重放）或 waiting（点「继续」重放）。
@@ -536,7 +545,7 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
           keptWaitingIds.push(r.id)
         } else {
           // running 中断 → 从 currentStepIndex 立即自动重放（contextData 恢复断点上下文）
-          void executeRunFromIndex(rr, def, rr.currentStepIndex, cp.contextData?.[r.id] ?? {})
+          runningReplays.push({ rr, def, startIndex: rr.currentStepIndex })
         }
       } else {
         // 不可重建 → 旧兜底：waiting→failed（提示重跑）、running→paused（可取消重跑）
@@ -555,6 +564,11 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
         Object.entries(cp.waitingRuns ?? {}).filter(([id]) => keptWaitingIds.includes(id))
       ),
     }))
+    // running 自动重放：先入列（上方 set 已把 restored run 放进 activeRuns）再 fire，保证
+    // executeRunFromIndex 完成判定能命中 finalRun（I-1/finalRun 正常），run 不 stuck running。
+    for (const { rr, def, startIndex } of runningReplays) {
+      void executeRunFromIndex(rr, def, startIndex, cp.contextData?.[rr.id] ?? {})
+    }
     return cp
   },
 
