@@ -129,6 +129,8 @@ export interface WorkflowCompleteAction {
   openResult?: () => void | Promise<void>
 }
 
+export type WorkflowParams = Record<string, unknown>
+
 export interface WorkflowDefinition {
   type: WorkflowType
   title: string
@@ -139,6 +141,8 @@ export interface WorkflowDefinition {
   }>
   /** 工作流完成后的通知/跳转动作（可选） */
   onComplete?: WorkflowCompleteAction
+  /** L2：可重建参数快照（type + 此 params → rehydrateWorkflow 重建定义；零改动调用点，方案 ii） */
+  rehydrateParams?: WorkflowParams
 }
 
 // ===== Store =====
