@@ -34,6 +34,31 @@ function countWords(text: string): number {
   return text.length
 }
 
+/**
+ * 流式剥离 <think>...</think> 段（QA 修复 A：openai-provider 把 reasoning_content
+ * 包成 <think> 标签流下；编辑器气泡只取最终正文，不向用户展示思考过程）。
+ * state.inThink 为跨 chunk 的流式状态（<think>/</think> 标签可能被拆到相邻 chunk）。
+ */
+function stripThinkStream(chunk: string, state: { inThink: boolean }): string {
+  let out = ''
+  let i = 0
+  while (i < chunk.length) {
+    if (!state.inThink) {
+      const open = chunk.indexOf('<think>', i)
+      if (open < 0) { out += chunk.slice(i); break }
+      out += chunk.slice(i, open)
+      i = open + '<think>'.length
+      state.inThink = true
+    } else {
+      const close = chunk.indexOf('</think>', i)
+      if (close < 0) { i = chunk.length; break }
+      i = close + '</think>'.length
+      state.inThink = false
+    }
+  }
+  return out
+}
+
 export type CodeMirrorEditorProps = {
   content: string
   filePath?: string
@@ -390,6 +415,12 @@ export default function CodeMirrorEditor({
   // （同 workflow-store 教训）→ 50ms 时间间隔硬约束，纯时间驱动
   const aiBufferRef = useRef('')
   const aiLastFlushRef = useRef(0)
+  // 流式 think 剥离的跨 chunk 状态（每次 handleAIAction 开始重置）
+  const thinkStreamRef = useRef({ inThink: false })
+  // 当前流式请求 id（供「停止生成」取消；流结束可空）
+  const aiRequestIdRef = useRef<string | null>(null)
+  // 是否流式生成中（决定气泡显示「停止」按钮，QA 修复 C）
+  const [aiGenerating, setAiGenerating] = useState(false)
   const [loadingDots, setLoadingDots] = useState('.')
   const [selectionRange, setSelectionRange] = useState<{ from: number, to: number } | null>(null)
   // 偏好记忆：AI 接受快照（检测用户后续手动修改 → 记录替换对）
@@ -661,35 +692,62 @@ export default function CodeMirrorEditor({
       setAiResult('')
       aiBufferRef.current = ''
       aiLastFlushRef.current = 0 // 0 = 首块立即 flush
+      thinkStreamRef.current = { inThink: false } // 重置 think 剥离状态
+      setAiGenerating(true)
 
-      await useLLMStore.getState().generateStream(
+      // 流式结束收尾（QA 修复 C：generateStream 的 await 只等到「发起请求」返回，
+      // 实际流经 llm:stream-done 事件；onDone 才是真正完成点——顺带修正既有
+      // 「末尾 flush 残留」在 await 后立即执行而吞掉尾块的问题）
+      const finishStream = () => {
+        if (aiBufferRef.current) {
+          setAiResult(prev => (prev ?? '') + aiBufferRef.current)
+          aiBufferRef.current = ''
+        }
+        aiRequestIdRef.current = null
+        setAiGenerating(false)
+      }
+
+      const requestId = await useLLMStore.getState().generateStream(
         [
           { role: 'system', content: t('ai.systemPrompt') },
           { role: 'user', content: `要求：${prompt}\n\n文本：\n${selectedText}` },
         ],
         {
           onChunk: (chunk) => {
-            aiBufferRef.current += chunk
+            // QA 修复 A：剥离 <think> 思考段（只向用户展示最终正文）
+            const filtered = stripThinkStream(chunk, thinkStreamRef.current)
+            if (!filtered) return
+            aiBufferRef.current += filtered
             if (Date.now() - aiLastFlushRef.current >= 50) {
               setAiResult(prev => (prev ?? '') + aiBufferRef.current)
               aiBufferRef.current = ''
               aiLastFlushRef.current = Date.now()
             }
           },
+          onDone: () => finishStream(),
           onError: () => {
             setAiResult(t('error.genFailed'))
+            finishStream()
           },
         }
       )
-      // 流结束：flush 残留缓冲（最后一批可能不足 50ms 间隔）
-      if (aiBufferRef.current) {
-        setAiResult(prev => (prev ?? '') + aiBufferRef.current)
-        aiBufferRef.current = ''
-      }
+      aiRequestIdRef.current = requestId
     } catch (e) {
       console.error(e)
       setAiResult(t('error.genFailed'))
+      setAiGenerating(false)
     }
+  }
+
+  /** 停止当前流式生成（QA 修复 C 的「停止」按钮）：取消请求并结束生成态 */
+  const handleStopAI = async () => {
+    const requestId = aiRequestIdRef.current
+    if (requestId) {
+      const { useLLMStore } = await import('../../stores/llm-store')
+      await useLLMStore.getState().cancelGeneration(requestId)
+    }
+    aiRequestIdRef.current = null
+    setAiGenerating(false)
   }
 
   /** 生成章节分享卡：先弹保存对话框（用户手势立即响应）→ LLM 摘要 → 卡片 → 截图 → 写入 */
@@ -867,45 +925,61 @@ export default function CodeMirrorEditor({
           onMouseDown={(e) => e.preventDefault()} // 防止编辑器失焦
         >
           {aiResult !== null ? (
-            <div className="w-[360px] max-h-[260px] overflow-y-auto p-2">
+            <div className="w-[360px] p-2 flex flex-col">
               <div
                 className="text-[10px] mb-1.5 font-medium flex items-center gap-1"
                 style={{ color: 'var(--color-text-muted)' }}
               >
                 <Sparkles size={11} style={{ color: 'var(--color-accent)' }} /> {activeAIAction ? t('codeEditor.previewSuffix').replace('{action}', activeAIAction) : t('codeEditor.aiPreview')}
               </div>
-              {/* 流式输入中显示动态内容 */}
-              {aiResult === '' ? (
-                <div
-                  className="text-xs leading-relaxed mb-3"
-                  style={{ color: 'var(--color-text-muted)' }}
-                >
-                  {t('status.generating')} {loadingDots}
-                </div>
-              ) : (
-                <div
-                  className="text-xs whitespace-pre-wrap leading-relaxed mb-3"
-                  style={{ color: 'var(--color-text-secondary)' }}
-                >
-                  {aiResult}
-                </div>
-              )}
-              <div className="flex items-center gap-2 justify-end">
-                <button
-                  className="px-2.5 py-1 text-xs rounded-md transition-colors"
-                  style={{ border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)' }}
-                  onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--color-hover)')}
-                  onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
-                  onClick={handleRejectAI}
-                >{t('editor.cancel')}</button>
-                <button
-                  className="px-2.5 py-1 text-xs rounded-md font-medium transition-colors"
-                  style={{ backgroundColor: 'var(--color-accent)', color: 'var(--color-text)' }}
-                  onMouseEnter={e => (e.currentTarget.style.opacity = '0.9')}
-                  onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
-                  disabled={aiResult === ''}
-                  onClick={handleAcceptAI}
-                >{t('inlineAccept.applyAsSuggestion')}</button>
+              {/* 内容区：独立滚动（QA 修复 C：内容长时按钮不被推出可视区） */}
+              <div className="max-h-[180px] overflow-y-auto">
+                {aiResult === '' ? (
+                  <div
+                    className="text-xs leading-relaxed mb-3"
+                    style={{ color: 'var(--color-text-muted)' }}
+                  >
+                    {t('status.generating')} {loadingDots}
+                  </div>
+                ) : (
+                  <div
+                    className="text-xs whitespace-pre-wrap leading-relaxed mb-3"
+                    style={{ color: 'var(--color-text-secondary)' }}
+                  >
+                    {aiResult}
+                  </div>
+                )}
+              </div>
+              {/* 按钮区固定可见（不随内容滚动） */}
+              <div className="flex items-center gap-2 justify-end pt-1.5 border-t"
+                style={{ borderColor: 'var(--color-border)' }}>
+                {aiGenerating ? (
+                  <button
+                    className="px-2.5 py-1 text-xs rounded-md transition-colors"
+                    style={{ border: '1px solid var(--color-border)', color: 'var(--color-error)' }}
+                    onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--color-hover)')}
+                    onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
+                    onClick={handleStopAI}
+                  >{t('action.stop')}</button>
+                ) : (
+                  <>
+                    <button
+                      className="px-2.5 py-1 text-xs rounded-md transition-colors"
+                      style={{ border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)' }}
+                      onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--color-hover)')}
+                      onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
+                      onClick={handleRejectAI}
+                    >{t('editor.cancel')}</button>
+                    <button
+                      className="px-2.5 py-1 text-xs rounded-md font-medium transition-colors"
+                      style={{ backgroundColor: 'var(--color-accent)', color: 'var(--color-text)' }}
+                      onMouseEnter={e => (e.currentTarget.style.opacity = '0.9')}
+                      onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
+                      disabled={aiResult === ''}
+                      onClick={handleAcceptAI}
+                    >{t('inlineAccept.applyAsSuggestion')}</button>
+                  </>
+                )}
               </div>
             </div>
           ) : (
@@ -946,13 +1020,20 @@ export default function CodeMirrorEditor({
                     onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--color-hover)')}
                     onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
                     onClick={() => {
-                      if (selectionRange && editorRef.current?.view) {
-                        const view = editorRef.current.view
-                        const text = view.state.sliceDoc(selectionRange.from, selectionRange.to)
-                        view.dispatch({
-                          changes: { from: selectionRange.from, to: selectionRange.to, insert: `**${text}**` }
-                        })
-                      }
+                      const view = editorRef.current?.view
+                      if (!view) return
+                      // 只读（已定稿/归档）时不可加粗——CM readOnly 只拦键盘输入，
+                      // 拦不住程序化 dispatch，此处须自行尊重 editable（QA 修复 B）
+                      if (!editable) return
+                      // 用当前光标选区而非 selectionRange（后者是 AI 气泡的旧选区，
+                      // 光标移位后会错位加粗旧段——QA 修复 B）；无选区则 no-op
+                      const sel = view.state.selection.main
+                      if (sel.empty) return
+                      const text = view.state.sliceDoc(sel.from, sel.to)
+                      if (!text) return
+                      view.dispatch({
+                        changes: { from: sel.from, to: sel.to, insert: `**${text}**` }
+                      })
                     }}
                   ><Bold size={14} /></button>
                   <div className="w-[1px] h-3 mx-1" style={{ backgroundColor: 'var(--color-border)' }} />

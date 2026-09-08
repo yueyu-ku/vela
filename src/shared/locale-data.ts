@@ -4,6 +4,7 @@
 export const UI_TEXTS_DATA = {
   'action.save': { 'zh-CN': '保存', 'en-US': 'Save', 'ru-RU': 'Сохранить' },
   'action.cancel': { 'zh-CN': '取消', 'en-US': 'Cancel', 'ru-RU': 'Отмена' },
+  'action.stop': { 'zh-CN': '停止', 'en-US': 'Stop', 'ru-RU': 'Стоп' },
   'action.confirm': { 'zh-CN': '确认', 'en-US': 'Confirm', 'ru-RU': 'Подтвердить' },
   'diff.original': { 'zh-CN': '原稿', 'en-US': 'Original', 'ru-RU': 'Оригинал' },
   'diff.modified': { 'zh-CN': '修稿', 'en-US': 'Revised', 'ru-RU': 'Изменённый' },
