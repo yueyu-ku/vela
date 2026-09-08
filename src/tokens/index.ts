@@ -25,10 +25,12 @@ export const tokens = {
       editorLineHighlight: 'rgba(255, 255, 255, 0.04)',
       editorSelection: 'rgba(38, 79, 120, 0.6)',
       error: '#F14C4C',
+      errorRgb: '241, 76, 76',
       focusRing: 'rgba(0, 122, 204, 0.4)',
       gold: '#C9A76C',
       hover: '#2A2D2E',
       info: '#3794FF',
+      infoRgb: '55, 148, 255',
       panel: '#252526',
       sash: 'transparent',
       sashHover: 'rgba(0, 122, 204, 0.5)',
@@ -37,6 +39,7 @@ export const tokens = {
       statusbar: '#181818',
       statusbarText: '#909090',
       success: '#89D185',
+      successRgb: '137, 209, 133',
       tabActive: '#1E1E1E',
       tabBg: 'transparent',
       tabBorder: 'transparent',
@@ -48,7 +51,8 @@ export const tokens = {
       titlebarText: '#CCCCCC',
       tooltipBg: '#252526',
       tooltipText: '#CCCCCC',
-      warning: '#CCA700'
+      warning: '#CCA700',
+      warningRgb: '204, 167, 0'
     },
     shadow: {
       lg: '0 12px 32px rgba(0, 0, 0, 0.6)',
@@ -56,6 +60,15 @@ export const tokens = {
       popover: '0 16px 40px -8px rgba(0, 0, 0, 0.7), 0 4px 16px -4px rgba(0, 0, 0, 0.5)',
       sm: '0 1px 2px rgba(0, 0, 0, 0.4)',
       tooltip: '0 4px 12px rgba(0, 0, 0, 0.5)'
+    },
+    z: {
+      base: '1',
+      dropdown: '100',
+      modal: '1000',
+      overlay: '500',
+      sticky: '200',
+      toast: '1100',
+      tooltip: '1200'
     }
   },
   galaxy: {
@@ -75,12 +88,14 @@ export const tokens = {
       border: '#172B42',
       editorBg: '#091525',
       editorLineHighlight: 'rgba(126, 200, 227, 0.04)',
-      editorSelection: 'rgba(126, 200, 227, 0.18)',
+      editorSelection: 'rgba(126, 200, 227, 0.30)',
       error: '#fb7185',
+      errorRgb: '251, 113, 133',
       focusRing: 'rgba(126, 200, 227, 0.50)',
       gold: '#C9A76C',
       hover: '#142640',
       info: '#7EC8E3',
+      infoRgb: '126, 200, 227',
       panel: '#0E1B30',
       sash: 'transparent',
       sashHover: 'rgba(126, 200, 227, 0.15)',
@@ -89,6 +104,7 @@ export const tokens = {
       statusbar: '#071220',
       statusbarText: '#4A6580',
       success: '#4ade80',
+      successRgb: '74, 222, 128',
       tabActive: '#0E1E35',
       tabBg: 'transparent',
       tabBorder: 'transparent',
@@ -100,7 +116,8 @@ export const tokens = {
       titlebarText: '#8BA4BE',
       tooltipBg: '#E0ECF4',
       tooltipText: '#0E1B30',
-      warning: '#fbbf24'
+      warning: '#fbbf24',
+      warningRgb: '251, 191, 36'
     },
     shadow: {
       lg: '0 12px 32px rgba(5, 10, 20, 0.7)',
@@ -108,6 +125,15 @@ export const tokens = {
       popover: '0 0 0 1px rgba(126, 200, 227, 0.06), 0 16px 40px -8px rgba(5, 10, 20, 0.85), 0 4px 16px -4px rgba(5, 10, 20, 0.7)',
       sm: '0 1px 2px rgba(0, 0, 0, 0.5)',
       tooltip: '0 4px 12px rgba(5, 10, 20, 0.5)'
+    },
+    z: {
+      base: '1',
+      dropdown: '100',
+      modal: '1000',
+      overlay: '500',
+      sticky: '200',
+      toast: '1100',
+      tooltip: '1200'
     }
   },
   light: {
@@ -127,12 +153,14 @@ export const tokens = {
       border: '#DEE3ED',
       editorBg: '#F7F9FC',
       editorLineHighlight: 'rgba(91, 158, 214, 0.04)',
-      editorSelection: 'rgba(91, 158, 214, 0.14)',
+      editorSelection: 'rgba(91, 158, 214, 0.30)',
       error: '#f43f5e',
+      errorRgb: '244, 63, 94',
       focusRing: 'rgba(91, 158, 214, 0.45)',
       gold: '#C9A76C',
       hover: '#EBF0F7',
       info: '#5B9ED6',
+      infoRgb: '91, 158, 214',
       panel: '#EFF2F7',
       sash: 'transparent',
       sashHover: 'rgba(91, 158, 214, 0.15)',
@@ -141,6 +169,7 @@ export const tokens = {
       statusbar: '#EFF2F7',
       statusbarText: '#8994A7',
       success: '#10b981',
+      successRgb: '16, 185, 129',
       tabActive: '#FFFFFF',
       tabBg: 'transparent',
       tabBorder: 'transparent',
@@ -152,7 +181,8 @@ export const tokens = {
       titlebarText: '#2D3748',
       tooltipBg: '#0F1A2E',
       tooltipText: '#E8ECF2',
-      warning: '#f59e0b'
+      warning: '#f59e0b',
+      warningRgb: '245, 158, 11'
     },
     font: {
       mono: '\'JetBrains Mono\', \'Fira Code\', monospace',
@@ -188,6 +218,15 @@ export const tokens = {
       bottomBar: '32px',
       leftBar: '44px',
       rightBar: '44px'
+    },
+    z: {
+      base: '1',
+      dropdown: '100',
+      modal: '1000',
+      overlay: '500',
+      sticky: '200',
+      toast: '1100',
+      tooltip: '1200'
     }
   },
   paper: {
@@ -207,12 +246,14 @@ export const tokens = {
       border: '#DDD8D0',
       editorBg: '#F8F3EB',
       editorLineHighlight: 'rgba(155, 142, 200, 0.04)',
-      editorSelection: 'rgba(155, 142, 200, 0.12)',
+      editorSelection: 'rgba(155, 142, 200, 0.30)',
       error: '#c45b5b',
+      errorRgb: '196, 91, 91',
       focusRing: 'rgba(155, 142, 200, 0.45)',
       gold: '#C9A76C',
       hover: '#E8E3DB',
       info: '#7B92C0',
+      infoRgb: '123, 146, 192',
       panel: '#EDE8E0',
       sash: 'transparent',
       sashHover: 'rgba(155, 142, 200, 0.12)',
@@ -221,6 +262,7 @@ export const tokens = {
       statusbar: '#EDE8E0',
       statusbarText: '#A09488',
       success: '#4d9e72',
+      successRgb: '77, 158, 114',
       tabActive: '#FAF5ED',
       tabBg: 'transparent',
       tabBorder: 'transparent',
@@ -232,7 +274,8 @@ export const tokens = {
       titlebarText: '#4A4038',
       tooltipBg: '#2C2520',
       tooltipText: '#F5F0E8',
-      warning: '#c8923a'
+      warning: '#c8923a',
+      warningRgb: '200, 146, 58'
     },
     shadow: {
       lg: '0 12px 32px rgba(44, 37, 32, 0.10)',
@@ -240,6 +283,15 @@ export const tokens = {
       popover: '0 16px 40px -8px rgba(44, 37, 32, 0.14), 0 4px 16px -4px rgba(44, 37, 32, 0.08)',
       sm: '0 1px 2px rgba(44, 37, 32, 0.06)',
       tooltip: '0 4px 12px rgba(44, 37, 32, 0.18)'
+    },
+    z: {
+      base: '1',
+      dropdown: '100',
+      modal: '1000',
+      overlay: '500',
+      sticky: '200',
+      toast: '1100',
+      tooltip: '1200'
     }
   }
 } as const
