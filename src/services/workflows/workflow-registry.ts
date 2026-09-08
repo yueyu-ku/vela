@@ -1,6 +1,6 @@
-import type { WorkflowDefinition, WorkflowType } from '../../stores/workflow-store'
+import type { WorkflowDefinition, WorkflowType, WorkflowParams } from '../../stores/workflow-store'
 
-export type WorkflowParams = Record<string, unknown>
+export type { WorkflowParams } from '../../stores/workflow-store'
 export type WorkflowRehydrateFactory = (params: WorkflowParams) => WorkflowDefinition
 
 const registry = new Map<WorkflowType, WorkflowRehydrateFactory>()
