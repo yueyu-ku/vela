@@ -1,0 +1,229 @@
+// @vitest-environment jsdom
+/**
+ * workflow-checkpoint v2（L2 任务5）专项：
+ * - save/load/restore 从 localStorage 迁到 DB（经 Task 4 IPC db:checkpoint-*）
+ * - runDefs + contextData 重建信息随 checkpoint 持久化
+ * - localStorage 兜底迁移（DB 空读旧数据并写回）
+ * - 损坏降级（非法/activeRuns 非数组 → 视为无 checkpoint，不崩）
+ * - 恢复决断：running 自动重放 / waiting 点继续重放（跨重启真续跑）
+ * - 跨任务约束 I-1：恢复态对齐 running，断点重放能打到 completed
+ */
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { useWorkflowStore } from './workflow-store'
+import { registerWorkflow } from '../services/workflows/workflow-registry'
+
+const CHECKPOINT_KEY = 'vela-workflow-checkpoint'
+
+// vi.hoisted：mock 工厂需要引用共享状态（dbMap/记录），且必须在 hoisted 作用域内定义
+const h = vi.hoisted(() => {
+  const dbMap = new Map<string, string>()
+  const invoke = vi.fn(async (...args: unknown[]) => {
+    const ch = args[0] as string
+    if (ch === 'db:checkpoint-save') {
+      dbMap.set('cp', JSON.stringify(args[1]))
+      return { success: true }
+    }
+    if (ch === 'db:checkpoint-load') {
+      return { success: true, data: dbMap.get('cp') ? JSON.parse(dbMap.get('cp')!) : null }
+    }
+    if (ch === 'db:checkpoint-clear') {
+      dbMap.delete('cp')
+      return { success: true }
+    }
+    return { success: true }
+  })
+  return { dbMap, invoke, seen: [] as string[] }
+})
+
+vi.mock('../services/ipc-client', () => ({
+  ipc: { invoke: (...a: unknown[]) => h.invoke(...(a as [])) },
+}))
+
+// 注册一个可重建的 workflow（type: post_process），executor 记录运行步骤供断言断点重放
+registerWorkflow('post_process', () => ({
+  type: 'post_process',
+  title: '后处理（L2 测试桩）',
+  steps: ['a', 'b', 'c'].map((name) => ({
+    name,
+    description: name,
+    executor: async () => {
+      h.seen.push(name)
+      return name
+    },
+  })),
+  rehydrateParams: {},
+}))
+
+/** 构造一个 3 步（a/b/c）的 post_process run 快照（checkpoint 内嵌形状） */
+function makeRun(id: string, over: Record<string, unknown> = {}) {
+  return {
+    id,
+    type: 'post_process' as const,
+    title: `run-${id}`,
+    status: 'running' as const,
+    currentStepIndex: 0,
+    createdAt: '2026-09-05T00:00:00.000Z',
+    steps: [
+      { id: `${id}-s0`, name: 'a', description: 'a', status: 'pending' as const, logs: [] },
+      { id: `${id}-s1`, name: 'b', description: 'b', status: 'pending' as const, logs: [] },
+      { id: `${id}-s2`, name: 'c', description: 'c', status: 'pending' as const, logs: [] },
+    ],
+    rehydrateParams: { seed: id },
+    ...over,
+  }
+}
+
+const resetStore = () => {
+  useWorkflowStore.setState({
+    activeRuns: [],
+    history: [],
+    globalLogs: [],
+    waitingRuns: {},
+    currentRun: null,
+    waitingForConfirm: false,
+    waitingAfterStepIndex: -1,
+  })
+}
+
+/** 轮询等待某条件成立（异步断点重放需等待 async 链路完成） */
+async function waitFor(fn: () => boolean, timeout = 2000): Promise<void> {
+  const start = Date.now()
+  while (!fn()) {
+    if (Date.now() - start > timeout) throw new Error('waitFor timeout')
+    await new Promise((r) => setTimeout(r, 1))
+  }
+}
+
+beforeEach(() => {
+  h.dbMap.clear()
+  h.seen.length = 0
+  localStorage.clear()
+  resetStore()
+})
+
+describe('workflow-checkpoint v2（L2）', () => {
+  it('restoreCheckpoint v2：waiting 断点重放（跨重启真续跑，I-1 对齐 running → completed）', async () => {
+    // waitingAfterStepIndex=1 → 断点续跑应从步骤 2（c）开始，seen 只含断点后步骤
+    const cp = {
+      activeRuns: [
+        makeRun('run-wait', {
+          currentStepIndex: 1,
+          status: 'waiting',
+          steps: [
+            { id: 's0', name: 'a', description: 'a', status: 'completed', result: 'a', logs: [] },
+            { id: 's1', name: 'b', description: 'b', status: 'completed', result: 'b', logs: [] },
+            { id: 's2', name: 'c', description: 'c', status: 'pending', logs: [] },
+          ],
+        }),
+      ],
+      waitingRuns: { 'run-wait': { waitingForConfirm: true, waitingAfterStepIndex: 1 } },
+      savedAt: '2026-09-05T00:01:00.000Z',
+      runDefs: { 'run-wait': { type: 'post_process', params: { seed: 'run-wait' } } },
+      contextData: { 'run-wait': { shared: 'ctx' } },
+    }
+    h.dbMap.set('cp', JSON.stringify(cp))
+
+    const restored = await useWorkflowStore.getState().restoreCheckpoint()
+    expect(restored).not.toBeNull()
+    const waitingRun = useWorkflowStore.getState().activeRuns.find((r) => r.id === 'run-wait')
+    expect(waitingRun?.status).toBe('waiting')
+    // 等待标记保留（confirmContinue 依赖 waitingAfterStepIndex 定位断点）
+    expect(useWorkflowStore.getState().waitingRuns['run-wait']?.waitingAfterStepIndex).toBe(1)
+    // waiting 未自动重放：seen 为空
+    expect(h.seen).toEqual([])
+
+    // 点「继续」→ 断点重放：只跑断点后步骤（c），并靠 I-1（restore 态对齐 running）打到 completed
+    useWorkflowStore.getState().confirmContinue('run-wait')
+    await waitFor(() => useWorkflowStore.getState().history.some((r) => r.id === 'run-wait'))
+    const finalRun = useWorkflowStore.getState().history.find((r) => r.id === 'run-wait')
+    expect(finalRun?.status).toBe('completed')
+    expect(h.seen).toEqual(['c'])
+  })
+
+  it('restoreCheckpoint v2：running 中断自动重放（从 currentStepIndex 立即续跑）', async () => {
+    const cp = {
+      activeRuns: [
+        makeRun('run-live', {
+          currentStepIndex: 1,
+          status: 'running',
+          steps: [
+            { id: 's0', name: 'a', description: 'a', status: 'completed', result: 'a', logs: [] },
+            { id: 's1', name: 'b', description: 'b', status: 'pending', logs: [] },
+            { id: 's2', name: 'c', description: 'c', status: 'pending', logs: [] },
+          ],
+        }),
+      ],
+      waitingRuns: {},
+      savedAt: '2026-09-05T00:02:00.000Z',
+      runDefs: { 'run-live': { type: 'post_process', params: { seed: 'run-live' } } },
+      contextData: { 'run-live': { shared: 'ctx' } },
+    }
+    h.dbMap.set('cp', JSON.stringify(cp))
+
+    await useWorkflowStore.getState().restoreCheckpoint()
+    // running 中断 → 立即自动重放（从 currentStepIndex=1 起跑 b、c）
+    await waitFor(() => useWorkflowStore.getState().history.some((r) => r.id === 'run-live'))
+    const finalRun = useWorkflowStore.getState().history.find((r) => r.id === 'run-live')
+    expect(finalRun?.status).toBe('completed')
+    expect(h.seen).toEqual(['b', 'c'])
+  })
+
+  it('restoreCheckpoint v2：不可重建 → 旧兜底（waiting→failed / running→paused，不自动重放）', async () => {
+    // 用未注册的 type（rehydrateWorkflow 返回 null）走旧兜底
+    const legacyRun = makeRun('run-old', {
+      type: 'chapter_creation' as const,
+      status: 'running',
+      steps: [
+        { id: 'x-s0', name: 'a', description: 'a', status: 'completed', result: 'a', logs: [] },
+        { id: 'x-s1', name: 'b', description: 'b', status: 'pending', logs: [] },
+      ],
+    })
+    const cp = {
+      activeRuns: [legacyRun],
+      waitingRuns: { 'run-old': { waitingForConfirm: true, waitingAfterStepIndex: 0 } },
+      savedAt: '2026-09-05T00:03:00.000Z',
+    }
+    h.dbMap.set('cp', JSON.stringify(cp))
+
+    await useWorkflowStore.getState().restoreCheckpoint()
+    const restoredRun = useWorkflowStore.getState().activeRuns.find((r) => r.id === 'run-old')
+    // 不可重建的 waiting → failed，且等待标记清除
+    expect(restoredRun?.status).toBe('failed')
+    expect(useWorkflowStore.getState().waitingRuns['run-old']).toBeUndefined()
+  })
+
+  it('saveCheckpoint 经迁移写回 DB：含 runDefs + contextData 重建信息', async () => {
+    // DB 空（h.dbMap 无 'cp'）+ localStorage 有旧 checkpoint（含 runDefs/contextData）
+    const legacyCp = {
+      activeRuns: [
+        makeRun('run-legacy', {
+          type: 'chapter_creation' as const,
+          currentStepIndex: 0,
+          steps: [
+            { id: 's0', name: 'a', description: 'a', status: 'completed', result: 'a', logs: [] },
+          ],
+        }),
+      ],
+      waitingRuns: {},
+      savedAt: '2026-09-05T00:04:00.000Z',
+      runDefs: { 'run-legacy': { type: 'chapter_creation', params: { seed: 'run-legacy' } } },
+      contextData: { 'run-legacy': { shared: 'ctx' } },
+    }
+    localStorage.setItem(CHECKPOINT_KEY, JSON.stringify(legacyCp))
+
+    const restored = await useWorkflowStore.getState().restoreCheckpoint()
+    expect(restored).not.toBeNull()
+    // DB 空 → 兜底读 localStorage 并迁移写回 DB
+    expect(h.dbMap.get('cp')).toBeTruthy()
+    const migrated = JSON.parse(h.dbMap.get('cp')!)
+    // 重建信息随迁移写回：runDefs + contextData 均保留
+    expect(migrated.runDefs['run-legacy']).toEqual({ type: 'chapter_creation', params: { seed: 'run-legacy' } })
+    expect(migrated.contextData['run-legacy']).toEqual({ shared: 'ctx' })
+  })
+
+  it('restoreCheckpoint v2：损坏降级（activeRuns 非数组/非法 JSON）→ 视为无 checkpoint，不崩', async () => {
+    h.dbMap.set('cp', JSON.stringify({ activeRuns: 'corrupt', savedAt: 'x' }))
+    await expect(useWorkflowStore.getState().restoreCheckpoint()).resolves.toBeNull()
+    expect(useWorkflowStore.getState().activeRuns).toHaveLength(0)
+  })
+})
