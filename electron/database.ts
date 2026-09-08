@@ -118,8 +118,8 @@ export function getProjectDb(): BetterSqlite3.Database | null {
 }
 
 // ===== Schema 版本管理 =====
-/** 当前数据库 schema 版本号（v16：llm_calls 新增 cached_tokens 列——CacheAligner 缓存命中事后统计） */
-const CURRENT_SCHEMA_VERSION = 16
+/** 当前数据库 schema 版本号（v17：workflow_checkpoints 表——L2 checkpoint 迁 DB） */
+const CURRENT_SCHEMA_VERSION = 17
 
 /** 检查并执行 schema 迁移（仅在版本号低于当前版本时运行） */
 function ensureSchemaVersion(db: BetterSqlite3.Database): void {
@@ -491,6 +491,15 @@ function createTables(db: BetterSqlite3.Database) {
       imported_at INTEGER DEFAULT 0,
       similarity REAL DEFAULT 0,
       audit_issues INTEGER DEFAULT 0
+    );
+
+    -- ============================================================
+    -- workflow_checkpoints — 工作流 checkpoint（每项目一库单行；L2 迁 DB，跨项目隔离）
+    -- ============================================================
+    CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      state_json TEXT NOT NULL DEFAULT '{}',
+      updated_at INTEGER DEFAULT (unixepoch() * 1000)
     );
   `)
 
@@ -947,5 +956,21 @@ function migrateExistingTables(db: BetterSqlite3.Database) {
     logger.info('DB', t('log.db.v13ConfigColumnsSnapshot'))
   } catch (e) {
     logger.warn('DB', t('log.db.v13ConfigColumnsSnapshotFailed').replace('{err}', String(e)))
+  }
+
+  // 17. v17: workflow_checkpoints 表（L2 checkpoint 迁 DB——主清单已有，迁移段幂等补建）
+  //    非关键 — 表缺失仅 checkpoint 持久化降级回 localStorage
+  try {
+    const t = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_checkpoints'`).get()
+    if (!t) {
+      db.exec(`CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        state_json TEXT NOT NULL DEFAULT '{}',
+        updated_at INTEGER DEFAULT (unixepoch() * 1000)
+      )`)
+      logger.info('DB', 'v17 迁移: 已创建 workflow_checkpoints')
+    }
+  } catch (e) {
+    logger.warn('DB', `v17 迁移未完成（非关键）: ${e}`)
   }
 }

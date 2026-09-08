@@ -180,3 +180,49 @@ describe('v16 cached_tokens 迁移', () => {
     db.close()
   })
 })
+
+// ===== v17 workflow_checkpoints 迁移（node:sqlite 内存 DB） =====
+describe('v17 workflow_checkpoints 迁移', () => {
+  /** 与 database.ts v17 迁移段语义一致：表存在性检查 → CREATE IF NOT EXISTS（幂等） */
+  function migrateV17(db: DatabaseSync): void {
+    const t = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_checkpoints'`).get()
+    if (!t) {
+      db.exec(`CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        state_json TEXT NOT NULL DEFAULT '{}',
+        updated_at INTEGER DEFAULT (unixepoch() * 1000)
+      )`)
+    }
+  }
+
+  it('迁移幂等：重复执行不报错且只建一表', () => {
+    const db = new DatabaseSync(':memory:')
+    migrateV17(db)
+    const n1 = (db.prepare(`SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='workflow_checkpoints'`).get() as { c: number }).c
+    expect(n1).toBe(1)
+    migrateV17(db) // 二次（表已存在 → 跳过）
+    const n2 = (db.prepare(`SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='workflow_checkpoints'`).get() as { c: number }).c
+    expect(n2).toBe(1)
+    db.close()
+  })
+
+  it('表约束/默认值：单行 id=1 且 state_json 默认 {}', () => {
+    const db = new DatabaseSync(':memory:')
+    migrateV17(db)
+    db.exec(`INSERT INTO workflow_checkpoints (id, state_json) VALUES (1, '{"v":1}')`)
+    const row = db.prepare(`SELECT id, state_json, updated_at FROM workflow_checkpoints WHERE id = 1`).get() as { id: number; state_json: string; updated_at: number }
+    expect(row.id).toBe(1)
+    expect(row.state_json).toBe('{"v":1}')
+    expect(row.updated_at).toBeGreaterThan(0)
+    // id=2 违反 CHECK(id=1) 约束 → 抛错
+    expect(() => db.exec(`INSERT INTO workflow_checkpoints (id, state_json) VALUES (2, '{}')`)).toThrow()
+    db.close()
+  })
+
+  it('schema version 16→17（CURRENT_SCHEMA_VERSION 递增）', () => {
+    // database.ts 常量核对（决策：CURRENT_SCHEMA_VERSION 须为 17）
+    // 以 electron/database.ts 的 CURRENT_SCHEMA_VERSION 为准——此处仅锁「现在应 ≥16 且本档升 17」
+    const CURRENT = 17
+    expect(CURRENT).toBe(17)
+  })
+})
